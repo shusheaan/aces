@@ -13,7 +13,9 @@ use nalgebra::Vector4;
 use rand::SeedableRng;
 
 use crate::config::GameConfig;
+use crate::fsm::SymbolicFsm;
 use crate::input::DroneCommand;
+use crate::perception::PerceptionMlp;
 use crate::policy::{self as policy, MlpPolicy};
 use crate::{ActiveDrone, GameState};
 
@@ -44,6 +46,10 @@ pub struct SimState {
     pub mppi: MppiOptimizer,
     /// Trained neural network policy (if policy.bin found at startup).
     pub policy: Option<MlpPolicy>,
+    /// Perception NN for the neurosymbolic pipeline (if perception.bin found).
+    pub perception: Option<PerceptionMlp>,
+    /// Symbolic FSM driven by perception features.
+    pub fsm: SymbolicFsm,
     pub dt_ctrl: f64,
     pub substeps: usize,
     pub rng: rand::rngs::StdRng,
@@ -111,10 +117,15 @@ fn init_sim(mut commands: Commands, config: Res<GameConfig>) {
 
     // Try to load a trained neural network policy
     let policy = MlpPolicy::load("policy.bin", hover, config.drone_params.max_thrust);
-    if policy.is_some() {
+
+    // Try to load a perception NN for the neurosymbolic pipeline
+    let perception = PerceptionMlp::load("perception.bin");
+    if perception.is_some() {
+        println!("[ACES] Loaded perception NN from perception.bin — using FSM+MPPI AI");
+    } else if policy.is_some() {
         println!("[ACES] Loaded neural network policy from policy.bin");
     } else {
-        println!("[ACES] No policy.bin found — using MPPI AI opponent");
+        println!("[ACES] No policy.bin or perception.bin — using pure MPPI AI");
     }
 
     commands.insert_resource(SimState {
@@ -128,6 +139,8 @@ fn init_sim(mut commands: Commands, config: Res<GameConfig>) {
         wind_b,
         mppi,
         policy,
+        perception,
+        fsm: SymbolicFsm::new(10),
         dt_ctrl: config.dt_ctrl,
         substeps: config.substeps,
         rng: rand::rngs::StdRng::seed_from_u64(42),
@@ -189,8 +202,57 @@ fn sim_step(mut sim: ResMut<SimState>, cmd: Res<DroneCommand>, active: Res<Activ
 
     let player_motors = command_to_motors(&cmd, &s.params);
 
-    // AI opponent: neural network (every tick) or MPPI (throttled)
-    let ai_motors = if let Some(ref nn) = s.policy {
+    // AI opponent: three-tier priority
+    //   1. Perception NN + FSM → MPPI (neurosymbolic)
+    //   2. policy.bin MLP (pure NN)
+    //   3. Pure MPPI (throttled fallback)
+    // Split the borrow: extract perception reference before the big if-else so
+    // we can use `if let` without fighting the borrow checker on `s.fsm`.
+    let has_perception = s.perception.is_some();
+    let ai_motors = if has_perception {
+        let lock_a_p = s.lock_a.progress();
+        let lock_b_p = s.lock_b.progress();
+        let (ai_own, ai_opp, lock_p, locked_p) = match *active {
+            ActiveDrone::A => (&s.state_b, &s.state_a, lock_b_p, lock_a_p),
+            ActiveDrone::B => (&s.state_a, &s.state_b, lock_a_p, lock_b_p),
+        };
+        let obs_dist = s.arena.obstacle_sdf(&ai_own.position);
+        let obs = policy::build_obs(ai_own, ai_opp, obs_dist, lock_p, locked_p);
+
+        // SAFETY: guarded by has_perception above.
+        let features = s
+            .perception
+            .as_ref()
+            .expect("perception checked above")
+            .infer(&obs);
+        let prev_mode = s.fsm.mode;
+        let fsm_out = s.fsm.step(&features);
+
+        if fsm_out.mode != prev_mode {
+            bevy::log::info!(
+                "[FSM] {} → {} (threat={:.2} opp={:.2} coll={:.2} unc={:.2} dist={:.1})",
+                prev_mode,
+                fsm_out.mode,
+                features.threat,
+                features.opportunity,
+                features.collision_risk,
+                features.uncertainty,
+                features.opponent_distance,
+            );
+        }
+
+        if s.tick.is_multiple_of(MPPI_EVERY_N_TICKS) {
+            let (ai_state, player_state) = match *active {
+                ActiveDrone::A => (s.state_b.clone(), s.state_a.clone()),
+                ActiveDrone::B => (s.state_a.clone(), s.state_b.clone()),
+            };
+            s.cached_ai_motors = s
+                .mppi
+                .compute_action(&ai_state, &player_state, fsm_out.pursuit);
+        }
+        s.tick = s.tick.wrapping_add(1);
+        s.cached_ai_motors
+    } else if let Some(ref nn) = s.policy {
         let lock_a_p = s.lock_a.progress();
         let lock_b_p = s.lock_b.progress();
         let (ai_own, ai_opp, lock_p, locked_p) = match *active {
@@ -320,6 +382,7 @@ pub fn reset_sim(sim: &mut SimState, config: &GameConfig) {
     sim.wind_a.reset();
     sim.wind_b.reset();
     sim.mppi.reset();
+    sim.fsm.reset();
     sim.tick = 0;
     let hover = sim.params.hover_thrust();
     sim.cached_ai_motors = Vector4::new(hover, hover, hover, hover);

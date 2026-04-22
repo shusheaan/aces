@@ -2,9 +2,11 @@ mod arena;
 mod camera;
 mod config;
 mod drone;
+mod fsm;
 mod hud;
 mod input;
 mod marker;
+mod perception;
 mod policy;
 mod simulation;
 
