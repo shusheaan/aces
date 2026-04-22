@@ -1,4 +1,15 @@
-# Default curriculum: 5 phases of increasing difficulty
+# Default curriculum: 6 phases of increasing difficulty
+
+[[phase]]
+name = "hover_stabilize"
+task = "hover"
+opponent = "none"
+wind_sigma = 0.0
+obs_noise_std = 0.0
+use_fpv = false
+max_timesteps = 100_000
+promote_condition = "reward>-5.0"
+promote_window = 50
 
 [[phase]]
 name = "pursuit_linear"

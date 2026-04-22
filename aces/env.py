@@ -78,6 +78,7 @@ class DroneDogfightEnv(gym.Env):
                 "lost_contact_penalty": 0.02,
             },
             "dogfight": {},
+            "hover": {},
         }
         for key, val in _TASK_REWARD_OVERRIDES.get(task, {}).items():
             self._reward_cfg[key] = val
@@ -386,7 +387,7 @@ class DroneDogfightEnv(gym.Env):
         hover = self._hover_thrust
         motors = hover + action * (self._max_thrust - hover)
         motors = np.clip(motors, 0.0, self._max_thrust)
-        return motors.tolist()
+        return motors.tolist()  # type: ignore[no-any-return]
 
     # ------------------------------------------------------------------
     # Opponent action
@@ -394,6 +395,9 @@ class DroneDogfightEnv(gym.Env):
 
     def _opponent_action(self) -> list[float]:
         """Compute opponent motor thrusts based on current task/mode."""
+        # No opponent in hover task or when opponent="none"
+        if self._task == "hover" or self._opponent_mode == "none":
+            return [self._hover_thrust] * 4
         if self._task == "pursuit_linear":
             return self._trajectory_action()
         elif self._task in ("pursuit_evasive", "search_pursuit"):
@@ -429,12 +433,12 @@ class DroneDogfightEnv(gym.Env):
         """MPPI opponent in evasion mode (pursuit=False)."""
         state_b = list(self._sim.drone_b_state())
         state_a = list(self._sim.drone_a_state())
-        action = self._mppi.compute_action(state_b, state_a, False)
+        action = self._mppi.compute_action(state_b, state_a, False)  # type: ignore[union-attr]
         return list(action)
 
     def _trajectory_action(self) -> list[float]:
         """PD controller tracking the current trajectory waypoint."""
-        target = self._traj_fn(t=self._step_count * self._dt_ctrl)
+        target = self._traj_fn(t=self._step_count * self._dt_ctrl)  # type: ignore[misc]
         state_b = self._sim.drone_b_state()
         pos = np.array(state_b[:3], dtype=np.float64)
         vel = np.array(state_b[3:6], dtype=np.float64)
@@ -515,7 +519,7 @@ class DroneDogfightEnv(gym.Env):
             traj_type, traj_kwargs = Trajectory.random_trajectory(
                 self._bounds, self.np_random
             )
-            self._traj_fn = lambda t, _type=traj_type, _kw=traj_kwargs: getattr(
+            self._traj_fn = lambda t, _type=traj_type, _kw=traj_kwargs: getattr(  # type: ignore[assignment]
                 Trajectory, _type
             )(t=t, **_kw)
 
@@ -541,6 +545,8 @@ class DroneDogfightEnv(gym.Env):
         )
         self._prev_belief_var = 0.0
         self._last_depth = None
+        # Track spawn position for hover task drift reward
+        self._hover_spawn_pos = np.array(state_a[:3], dtype=np.float64)
 
         # At reset drones start at hover with identity rotation
         initial_euler = (0.0, 0.0, 0.0)
@@ -555,10 +561,16 @@ class DroneDogfightEnv(gym.Env):
                 euler=initial_euler,
             )
         else:
-            initial_visible = 1.0 if self._sim.check_los(pos_a, pos_b) else 0.0
-            obs = self._build_obs(
+            # For hover task or no-opponent mode, zero out opponent-related obs
+            if self._task == "hover" or self._opponent_mode == "none":
+                zero_opp = [0.0] * len(state_b)
+                initial_visible = 0.0
+            else:
+                zero_opp = state_b
+                initial_visible = 1.0 if self._sim.check_los(pos_a, pos_b) else 0.0
+            obs = self._build_obs(  # type: ignore[assignment]
                 state_a,
-                state_b,
+                zero_opp,
                 nearest_obs_dist=10.0,
                 lock_progress=0.0,
                 being_locked_progress=0.0,
@@ -570,7 +582,7 @@ class DroneDogfightEnv(gym.Env):
             "agent_pos": np.array(state_a[:3], dtype=np.float32),
             "opponent_pos": np.array(state_b[:3], dtype=np.float32),
         }
-        return obs, info
+        return obs, info  # type: ignore[return-value]
 
     def step(
         self, action: np.ndarray
@@ -610,39 +622,71 @@ class DroneDogfightEnv(gym.Env):
             )
         else:
             # Vector mode: belief state
-            visible = result.a_sees_b
-            if visible:
-                if self._obs_noise_std > 0.0:
-                    ekf_pos = list(result.ekf_b_pos_from_a)
-                    ekf_vel = list(result.ekf_b_vel_from_a)
-                    opp_for_obs = ekf_pos + ekf_vel + list(state_b[6:])
-                else:
-                    opp_for_obs = state_b
+            # For hover task or no-opponent mode, zero out opponent-related dims
+            if self._task == "hover" or self._opponent_mode == "none":
+                opp_for_obs = [0.0] * len(state_b)
+                obs = self._build_obs(  # type: ignore[assignment]
+                    state_a,
+                    opp_for_obs,
+                    nearest_obs_dist=result.nearest_obs_dist_a,
+                    lock_progress=0.0,
+                    being_locked_progress=0.0,
+                    opponent_visible=0.0,
+                    belief_uncertainty=0.0,
+                    time_since_last_seen=0.0,
+                    euler=euler_a,
+                )
             else:
-                belief_pos = list(result.belief_b_pos_from_a)
-                opp_for_obs = belief_pos + [0.0, 0.0, 0.0] + list(state_b[6:])
+                visible = result.a_sees_b
+                if visible:
+                    if self._obs_noise_std > 0.0:
+                        ekf_pos = list(result.ekf_b_pos_from_a)
+                        ekf_vel = list(result.ekf_b_vel_from_a)
+                        opp_for_obs = ekf_pos + ekf_vel + list(state_b[6:])
+                    else:
+                        opp_for_obs = state_b
+                else:
+                    belief_pos = list(result.belief_b_pos_from_a)
+                    opp_for_obs = belief_pos + [0.0, 0.0, 0.0] + list(state_b[6:])
 
-            obs = self._build_obs(
-                state_a,
-                opp_for_obs,
-                nearest_obs_dist=result.nearest_obs_dist_a,
-                lock_progress=result.lock_a_progress,
-                being_locked_progress=result.lock_b_progress,
-                opponent_visible=1.0 if visible else 0.0,
-                belief_uncertainty=result.belief_b_var_from_a,
-                time_since_last_seen=result.time_since_a_saw_b,
-                euler=euler_a,
-            )
+                obs = self._build_obs(  # type: ignore[assignment]
+                    state_a,
+                    opp_for_obs,
+                    nearest_obs_dist=result.nearest_obs_dist_a,
+                    lock_progress=result.lock_a_progress,
+                    being_locked_progress=result.lock_b_progress,
+                    opponent_visible=1.0 if visible else 0.0,
+                    belief_uncertainty=result.belief_b_var_from_a,
+                    time_since_last_seen=result.time_since_a_saw_b,
+                    euler=euler_a,
+                )
 
         # ---- Reward computation ----
         rcfg = self._reward_cfg
         reward = 0.0
         terminated = False
 
+        # Compute angular velocity norm for constraint info (used in hover reward too)
+        own_state_arr = np.array(state_a, dtype=np.float64)
+        ang_vel_norm = float(np.linalg.norm(own_state_arr[10:13]))
+
         # Terminal conditions (agent collision / OOB)
         if result.drone_a_collision or result.drone_a_oob:
-            reward = float(rcfg["collision_penalty"])
+            if self._task == "hover":
+                reward = -10.0
+            else:
+                reward = float(rcfg["collision_penalty"])
             terminated = True
+        elif self._task == "hover":
+            # Hover task reward: penalise angular velocity, position drift, control
+            # and give small survival bonus
+            pos_drift = float(np.linalg.norm(own_state_arr[:3] - self._hover_spawn_pos))
+            motors_arr = np.array(motors_a, dtype=np.float64)
+            hover_arr = np.full(4, self._hover_thrust, dtype=np.float64)
+            ctrl_cost = float(np.sum((motors_arr - hover_arr) ** 2))
+            reward = (
+                -ang_vel_norm - pos_drift - 0.01 * ctrl_cost + 0.01  # survival bonus
+            )
         # Opponent kills agent
         elif result.kill_b:
             reward = float(rcfg["killed_penalty"])
@@ -718,6 +762,12 @@ class DroneDogfightEnv(gym.Env):
                 "depth": result.det_a_depth,
                 "pixel_center": list(result.det_a_pixel_center),
             },
+            # Constraint-relevant fields for Lagrangian PPO
+            "collision": bool(result.drone_a_collision or result.drone_a_oob),
+            "nearest_obs_dist": float(result.nearest_obs_dist_a),
+            "angular_velocity_norm": ang_vel_norm,
+            "terminated": bool(terminated),
+            "truncated": bool(truncated),
         }
 
-        return obs, float(reward), bool(terminated), bool(truncated), info
+        return obs, float(reward), bool(terminated), bool(truncated), info  # type: ignore[return-value]
