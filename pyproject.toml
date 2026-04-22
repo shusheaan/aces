@@ -18,6 +18,8 @@ maturin = ">=1.5,<2.0"
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7.0"
 ruff = ">=0.4"
+mypy = ">=1.10"
+pre-commit = ">=3.7"
 
 [build-system]
 requires = ["poetry-core>=2.0"]
@@ -28,6 +30,12 @@ python-source = "."
 module-name = "aces._core"
 manifest-path = "crates/py-bridge/Cargo.toml"
 features = ["pyo3/extension-module"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

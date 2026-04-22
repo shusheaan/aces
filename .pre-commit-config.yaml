@@ -13,6 +13,13 @@ repos:
         entry: .venv/bin/ruff check
         types: [python]
 
+      - id: mypy
+        name: mypy
+        language: system
+        entry: .venv/bin/mypy
+        types: [python]
+        args: [--ignore-missing-imports]
+
       - id: cargo-fmt
         name: cargo fmt
         language: system
