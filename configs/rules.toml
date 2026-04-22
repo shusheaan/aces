@@ -49,6 +49,22 @@ wind_sigma = 0.3              # Wind volatility (N), set 0 to disable
 # Observation noise (Gaussian)
 obs_noise_std = 0.1           # Position observation noise std (m), set 0 to disable
 
+# Actuator noise
+motor_time_constant = 0.0     # First-order delay (seconds), 0 = instant
+motor_noise_std = 0.0         # Multiplicative motor noise std, 0 = off
+motor_bias_range = 0.0        # Per-motor bias range (fraction), 0 = off
+
+# IMU bias random walk
+imu_accel_bias_std = 0.0      # Accel bias walk (m/s² per √s), 0 = off
+imu_gyro_bias_std = 0.0       # Gyro bias walk (rad/s per √s), 0 = off
+
+[domain_randomization]
+enabled = false
+mass_range = 0.0              # ±fraction of nominal mass
+inertia_range = 0.0           # ±fraction of nominal inertia
+max_thrust_range = 0.0        # ±fraction of nominal max thrust
+drag_range = 0.0              # ±fraction of nominal drag coeff
+
 [camera]
 enabled = false              # Set true to enable FPV depth rendering
 width = 320                  # Full-resolution depth image width
