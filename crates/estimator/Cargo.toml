@@ -1,0 +1,13 @@
+[package]
+name = "aces-estimator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aces-sim-core = { path = "../sim-core" }
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

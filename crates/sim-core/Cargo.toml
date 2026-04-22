@@ -1,0 +1,15 @@
+[package]
+name = "aces-sim-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+bincode = "1.3"
+
+[dev-dependencies]
+approx = { workspace = true }

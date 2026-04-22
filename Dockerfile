@@ -1,0 +1,171 @@
+# ACES Headless Training Dockerfile
+# Ubuntu 24.04 + Rust + Python 3.12 + PyTorch (CPU)
+#
+# Builds the Rust extension (sim-core, mppi, estimator, py-bridge) in release
+# mode and installs all Python deps needed for headless RL training.
+# Does NOT build the Bevy game crate (not needed for training).
+#
+# ── Build ─────────────────────────────────────────────────────────
+#   docker build -t aces-train .
+#
+# ── Train (single stage) ─────────────────────────────────────────
+#   docker run --rm \
+#       -v $(pwd)/models:/app/models \
+#       -v $(pwd)/logs:/app/logs \
+#       aces-train \
+#       python scripts/run.py --mode train --timesteps 500000 \
+#           --save-path models/aces_model --no-vis
+#
+# ── Train FPV with CNN policy ────────────────────────────────────
+#   docker run --rm \
+#       -v $(pwd)/models:/app/models \
+#       -v $(pwd)/logs:/app/logs \
+#       aces-train \
+#       python scripts/run.py --mode train --timesteps 500000 \
+#           --fpv --save-path models/aces_fpv --no-vis
+#
+# ── Curriculum training (all 4 stages) ───────────────────────────
+#   docker run --rm -it \
+#       -v $(pwd)/models:/app/models \
+#       -v $(pwd)/logs:/app/logs \
+#       aces-train bash
+#   # then inside container:
+#   python scripts/run.py --mode train --task pursuit_linear  --timesteps 200000 --save-path models/stage2 --no-vis
+#   python scripts/run.py --mode train --task pursuit_evasive --timesteps 300000 --save-path models/stage3 --no-vis
+#   python scripts/run.py --mode train --task search_pursuit  --timesteps 300000 --save-path models/stage4 --no-vis
+#   python scripts/run.py --mode train --task dogfight        --timesteps 500000 --save-path models/stage5 --no-vis
+#
+# ── Evaluate ─────────────────────────────────────────────────────
+#   docker run --rm -v $(pwd)/models:/app/models \
+#       aces-train \
+#       python scripts/run.py --mode evaluate \
+#           --model-path models/aces_model --opponent mppi \
+#           --n-episodes 100 --no-vis
+#
+# ── Export policy for Bevy ───────────────────────────────────────
+#   docker run --rm -v $(pwd)/models:/app/models \
+#       aces-train \
+#       python scripts/run.py --mode export \
+#           --model-path models/aces_model --save-path models/policy.bin
+
+# =================================================================
+# Stage 1: Rust extension builder
+# =================================================================
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        pkg-config \
+        libssl-dev \
+        python3.12 \
+        python3.12-dev \
+        python3.12-venv \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (stable, minimal profile — no docs/clippy/rustfmt)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Python venv for maturin
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+RUN pip install --no-cache-dir "maturin>=1.5,<2.0"
+
+WORKDIR /build
+
+# ── Layer cache: Cargo manifests first ──
+COPY Cargo.toml Cargo.lock ./
+COPY crates/sim-core/Cargo.toml crates/sim-core/Cargo.toml
+COPY crates/mppi/Cargo.toml     crates/mppi/Cargo.toml
+COPY crates/estimator/Cargo.toml crates/estimator/Cargo.toml
+COPY crates/py-bridge/Cargo.toml crates/py-bridge/Cargo.toml
+
+# Stub game crate so workspace resolves (we skip building Bevy)
+RUN mkdir -p crates/game/src \
+    && printf '[package]\nname = "aces-game"\nversion = "0.1.0"\nedition = "2021"\n' \
+       > crates/game/Cargo.toml \
+    && echo 'fn main() {}' > crates/game/src/main.rs
+
+# Stub Rust sources to pre-fetch deps
+RUN mkdir -p crates/sim-core/src crates/mppi/src crates/estimator/src crates/py-bridge/src \
+    && echo '' > crates/sim-core/src/lib.rs \
+    && echo '' > crates/mppi/src/lib.rs \
+    && echo '' > crates/estimator/src/lib.rs \
+    && echo 'use pyo3::prelude::*; #[pymodule] fn _core(_py: Python, _m: &Bound<PyModule>) -> PyResult<()> { Ok(()) }' \
+       > crates/py-bridge/src/lib.rs
+
+# Minimal pyproject.toml + package stub for maturin
+COPY pyproject.toml ./
+RUN mkdir -p aces && echo '__version__ = "0.1.0"' > aces/__init__.py
+
+# Pre-build deps (this layer is cached until Cargo.toml changes)
+RUN maturin build --release --interpreter python3.12 2>/dev/null || true
+RUN cargo fetch 2>/dev/null || true
+
+# ── Now copy real source and build ──
+COPY crates/sim-core/src/ crates/sim-core/src/
+COPY crates/mppi/src/     crates/mppi/src/
+COPY crates/estimator/src/ crates/estimator/src/
+COPY crates/py-bridge/src/ crates/py-bridge/src/
+
+# Build release wheel (only py-bridge crate → aces._core)
+RUN maturin build --release --interpreter python3.12 \
+    && pip install --no-cache-dir --force-reinstall target/wheels/aces-*.whl
+
+
+# =================================================================
+# Stage 2: Slim runtime image
+# =================================================================
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3.12-venv \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy venv with built extension from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Install Python ML stack
+# PyTorch CPU-only first (large, separate layer for caching)
+RUN pip install --no-cache-dir \
+        torch --index-url https://download.pytorch.org/whl/cpu
+
+# RL + utility deps
+RUN pip install --no-cache-dir \
+        "gymnasium>=0.29" \
+        "stable-baselines3>=2.0" \
+        "numpy>=1.24" \
+        "toml>=0.10" \
+        "rerun-sdk>=0.18"
+
+# rerun-sdk is installed because aces/__init__.py imports it at top level.
+# The Rerun *viewer* won't launch without a display, but the SDK is still
+# importable. Training with --no-vis never spawns the viewer.
+
+# Copy project source (Python only — Rust is already compiled in the wheel)
+WORKDIR /app
+COPY aces/      aces/
+COPY configs/   configs/
+COPY scripts/   scripts/
+
+# Output dirs (mount these as volumes for persistence)
+RUN mkdir -p /app/models /app/logs
+
+# Sanity check: verify the Rust extension loads
+RUN python3.12 -c "from aces._core import Simulation, MppiController; print('[ACES] Rust extension OK')"
+
+# Default entrypoint
+ENTRYPOINT ["python", "scripts/run.py"]
+CMD ["--help"]

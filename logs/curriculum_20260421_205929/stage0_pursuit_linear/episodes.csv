@@ -1,0 +1,3 @@
+episode,timestep,reward,length,kill,death,crash,lock_progress,distance
+1,67,-49.1560,67,0,0,1,0.0000,10.2753
+2,122,50.3437,55,0,0,1,0.0000,11.9454

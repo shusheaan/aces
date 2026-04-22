@@ -1,0 +1,16 @@
+[package]
+name = "aces-py-bridge"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+aces-sim-core = { path = "../sim-core" }
+aces-mppi = { path = "../mppi" }
+aces-estimator = { path = "../estimator" }
+pyo3 = { workspace = true }
+nalgebra = { workspace = true }
+rand = { workspace = true }

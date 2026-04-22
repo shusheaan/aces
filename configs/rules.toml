@@ -1,0 +1,74 @@
+# Combat rules configuration
+
+[lockon]
+fov_degrees = 90.0          # Camera field of view (full cone angle)
+lock_distance = 2.0         # Maximum lock-on distance (meters)
+lock_duration = 1.5         # Time to hold lock for a kill (seconds)
+
+[mppi]
+num_samples = 1024          # Number of sampled trajectories
+horizon = 50                # Control steps lookahead (0.5s at 100Hz)
+temperature = 10.0          # MPPI temperature parameter (lambda)
+noise_std = 0.03            # Motor noise std (N)
+
+[mppi.weights]
+w_dist = 1.0                # Distance to opponent weight
+w_face = 5.0                # Facing opponent weight
+w_ctrl = 0.01               # Control smoothness weight
+w_obs = 1000.0              # Obstacle avoidance weight
+d_safe = 0.3                # Safe distance from obstacles (m)
+
+[training]
+total_timesteps = 500_000
+learning_rate = 3e-4
+batch_size = 64
+n_steps = 2048
+gamma = 0.99
+gae_lambda = 0.95
+clip_range = 0.2
+n_epochs = 10
+opponent_update_interval = 10_000
+max_episode_steps = 1000
+
+[mppi.risk]
+# Risk-aware MPPI (CVaR filtering with wind sampling)
+wind_theta = 2.0              # OU reversion rate for planning wind
+wind_sigma = 0.0              # Wind volatility for planning (0 = disabled / standard MPPI)
+cvar_alpha = 0.05             # Fraction of worst-case trajectories to penalize
+cvar_penalty = 10.0           # Extra cost multiplier for worst-alpha trajectories
+
+[noise]
+# Ornstein-Uhlenbeck wind disturbance
+wind_theta = 2.0              # Mean reversion rate (higher = faster return to mean)
+wind_mu = [0.0, 0.0, 0.0]    # Mean wind force (N)
+wind_sigma = 0.3              # Wind volatility (N), set 0 to disable
+
+# Observation noise (Gaussian)
+obs_noise_std = 0.1           # Position observation noise std (m), set 0 to disable
+
+[camera]
+enabled = false              # Set true to enable FPV depth rendering
+width = 320                  # Full-resolution depth image width
+height = 240                 # Full-resolution depth image height
+fov_deg = 90.0               # Horizontal field of view (degrees)
+render_hz = 30               # Camera render rate
+max_depth = 15.0             # Maximum ray depth (meters)
+policy_width = 80            # Downsampled resolution for policy network
+policy_height = 60
+
+[detection]
+drone_radius = 0.05          # Opponent sphere radius for detection
+min_confidence_distance = 5.0 # Distance at which confidence drops to 0
+
+[reward]
+kill_reward = 100.0
+killed_penalty = -100.0
+collision_penalty = -50.0
+lock_progress_reward = 0.1
+control_penalty = 0.01
+approach_reward = 0.05
+survival_bonus = 0.01
+
+# Level 3: Information-theoretic exploration rewards
+info_gain_reward = 0.02           # Reward for reducing belief uncertainty
+lost_contact_penalty = 0.005      # Penalty per second of lost visual contact

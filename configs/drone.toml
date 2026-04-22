@@ -1,0 +1,19 @@
+# Quadrotor physical parameters (Crazyflie 2.1 reference)
+
+[physical]
+mass = 0.027              # kg
+arm_length = 0.04         # m (motor to center of gravity)
+max_motor_thrust = 0.15   # N (per motor)
+torque_coefficient = 0.005964
+drag_coefficient = 0.01
+gravity = 9.81            # m/s^2
+
+[inertia]
+ixx = 1.4e-5             # kg*m^2
+iyy = 1.4e-5
+izz = 2.17e-5
+
+[simulation]
+dt_sim = 0.001           # s (1000 Hz simulation)
+dt_ctrl = 0.01           # s (100 Hz control)
+substeps = 10            # RK4 steps per control cycle

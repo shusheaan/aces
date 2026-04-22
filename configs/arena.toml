@@ -1,0 +1,42 @@
+# Arena configuration — default "warehouse" scene
+
+[bounds]
+x = 10.0                 # meters
+y = 10.0
+z = 3.0
+
+[drone]
+collision_radius = 0.05  # meters
+
+# Spawn positions (diagonal corners)
+[spawn]
+drone_a = [1.0, 1.0, 1.5]
+drone_b = [9.0, 9.0, 1.5]
+
+# Obstacles: axis-aligned box pillars (floor to ceiling)
+# Each defined by center [x, y, z] and half_extents [hx, hy, hz]
+
+[[obstacles]]
+type = "box"
+center = [2.0, 2.0, 1.5]
+half_extents = [0.5, 0.5, 1.5]
+
+[[obstacles]]
+type = "box"
+center = [2.0, 8.0, 1.5]
+half_extents = [0.5, 0.5, 1.5]
+
+[[obstacles]]
+type = "box"
+center = [5.0, 5.0, 1.5]
+half_extents = [0.5, 0.5, 1.5]
+
+[[obstacles]]
+type = "box"
+center = [8.0, 2.0, 1.5]
+half_extents = [0.5, 0.5, 1.5]
+
+[[obstacles]]
+type = "box"
+center = [8.0, 8.0, 1.5]
+half_extents = [0.5, 0.5, 1.5]

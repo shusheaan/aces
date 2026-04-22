@@ -1,0 +1,56 @@
+# Default curriculum: 5 phases of increasing difficulty
+
+[[phase]]
+name = "pursuit_linear"
+task = "pursuit_linear"
+opponent = "trajectory"
+wind_sigma = 0.0
+obs_noise_std = 0.0
+use_fpv = false
+max_timesteps = 200_000
+promote_condition = "win_rate>0.3"
+promote_window = 100
+
+[[phase]]
+name = "pursuit_evasive"
+task = "pursuit_evasive"
+opponent = "mppi_evasion"
+wind_sigma = 0.0
+obs_noise_std = 0.0
+use_fpv = false
+max_timesteps = 300_000
+promote_condition = "win_rate>0.3"
+promote_window = 200
+
+[[phase]]
+name = "search_pursuit"
+task = "search_pursuit"
+opponent = "mppi_evasion"
+wind_sigma = 0.0
+obs_noise_std = 0.1
+use_fpv = false
+max_timesteps = 300_000
+promote_condition = "win_rate>0.25"
+promote_window = 200
+
+[[phase]]
+name = "self_play_noisy"
+task = "dogfight"
+opponent = "pool"
+wind_sigma = 0.3
+obs_noise_std = 0.1
+use_fpv = false
+max_timesteps = 2_000_000
+promote_condition = "win_rate>0.55"
+promote_window = 500
+
+[[phase]]
+name = "fpv_transfer"
+task = "dogfight"
+opponent = "pool"
+wind_sigma = 0.3
+obs_noise_std = 0.1
+use_fpv = true
+max_timesteps = 5_000_000
+promote_condition = "steps"
+promote_window = 500

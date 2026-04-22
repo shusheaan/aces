@@ -1,0 +1,34 @@
+# Build artifacts
+target/
+*.so
+*.dylib
+*.pyd
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Output
+logs/
+models/
+*.zip
+
+# Docs (not needed in image)
+docs/
+
+# Tests (not needed in image)
+tests/
+
+# Bevy game crate (not needed for training)
+crates/game/

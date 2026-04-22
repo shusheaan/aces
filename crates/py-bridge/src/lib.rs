@@ -1,0 +1,836 @@
+use pyo3::prelude::*;
+
+use aces_estimator::ekf::EKF;
+use aces_estimator::particle_filter::ParticleFilter;
+use aces_mppi::cost::CostWeights;
+use aces_mppi::optimizer::{MppiOptimizer, RiskConfig};
+use aces_sim_core::camera::{render_depth, CameraFrame, CameraParams};
+use aces_sim_core::collision::{check_line_of_sight, Visibility};
+use aces_sim_core::detection::{detect_opponent, Detection};
+use aces_sim_core::dynamics::{step_rk4, DroneParams};
+use aces_sim_core::environment::{Arena, Obstacle};
+use aces_sim_core::lockon::{LockOnParams, LockOnTracker};
+use aces_sim_core::noise::ObservationNoise;
+use aces_sim_core::safety::SafetyEnvelope;
+use aces_sim_core::state::DroneState;
+use aces_sim_core::wind::WindModel;
+use nalgebra::{Vector3, Vector4};
+use rand::SeedableRng;
+
+// ---------------------------------------------------------------------------
+// StepResult — returned from Simulation.step()
+// ---------------------------------------------------------------------------
+
+#[pyclass(get_all)]
+#[derive(Clone)]
+struct StepResult {
+    drone_a_state: [f64; 13],
+    drone_b_state: [f64; 13],
+    drone_a_forward: [f64; 3],
+    drone_b_forward: [f64; 3],
+    drone_a_euler: [f64; 3],
+    drone_b_euler: [f64; 3],
+    drone_a_collision: bool,
+    drone_a_oob: bool,
+    drone_b_collision: bool,
+    drone_b_oob: bool,
+    lock_a_progress: f64,
+    lock_b_progress: f64,
+    kill_a: bool,
+    kill_b: bool,
+    distance: f64,
+    nearest_obs_dist_a: f64,
+    nearest_obs_dist_b: f64,
+    /// Noisy observation of drone B's position as seen by drone A
+    noisy_b_pos_from_a: [f64; 3],
+    /// Noisy observation of drone A's position as seen by drone B
+    noisy_a_pos_from_b: [f64; 3],
+    /// Current wind force on drone A (world frame, N)
+    wind_force_a: [f64; 3],
+    /// Current wind force on drone B (world frame, N)
+    wind_force_b: [f64; 3],
+    /// EKF-estimated position of drone B as tracked by drone A
+    ekf_b_pos_from_a: [f64; 3],
+    /// EKF-estimated velocity of drone B as tracked by drone A
+    ekf_b_vel_from_a: [f64; 3],
+    /// EKF-estimated position of drone A as tracked by drone B
+    ekf_a_pos_from_b: [f64; 3],
+    /// EKF-estimated velocity of drone A as tracked by drone B
+    ekf_a_vel_from_b: [f64; 3],
+    /// Whether drone A can see drone B (line-of-sight not blocked)
+    a_sees_b: bool,
+    /// Whether drone B can see drone A
+    b_sees_a: bool,
+    /// Time since drone A last saw drone B (seconds, 0 if currently visible)
+    time_since_a_saw_b: f64,
+    /// Time since drone B last saw drone A (seconds, 0 if currently visible)
+    time_since_b_saw_a: f64,
+    /// Belief state: estimated opponent position (particle filter mean when occluded, EKF when visible)
+    belief_b_pos_from_a: [f64; 3],
+    /// Belief state uncertainty (particle filter variance, 0 when visible)
+    belief_b_var_from_a: f64,
+    /// Belief state: estimated opponent position for drone B
+    belief_a_pos_from_b: [f64; 3],
+    /// Belief state uncertainty for drone B
+    belief_a_var_from_b: f64,
+    // --- Level 4: Camera/FPV ---
+    /// Depth image for drone A's camera (flattened 320x240, row-major). None between renders.
+    depth_image_a: Option<Vec<f32>>,
+    /// Depth image for drone B's camera. None between renders.
+    depth_image_b: Option<Vec<f32>>,
+    /// Whether drone A's camera rendered a new frame this step.
+    camera_rendered_a: bool,
+    /// Whether drone B's camera rendered a new frame this step.
+    camera_rendered_b: bool,
+    // Detection results for drone A (detecting opponent B)
+    det_a_detected: bool,
+    det_a_bbox: [f32; 4],
+    det_a_confidence: f32,
+    det_a_depth: f32,
+    det_a_pixel_center: [f32; 2],
+    // Detection results for drone B (detecting opponent A)
+    det_b_detected: bool,
+    det_b_bbox: [f32; 4],
+    det_b_confidence: f32,
+    det_b_depth: f32,
+    det_b_pixel_center: [f32; 2],
+    // Safety: 0=Ok, 1=Warning, 2=Critical
+    safety_a: u8,
+    safety_b: u8,
+}
+
+// ---------------------------------------------------------------------------
+// Simulation — holds two drones, arena, lock-on trackers
+// ---------------------------------------------------------------------------
+
+#[pyclass]
+struct Simulation {
+    arena: Arena,
+    params: DroneParams,
+    drone_a: DroneState,
+    drone_b: DroneState,
+    lock_a: LockOnTracker,
+    lock_b: LockOnTracker,
+    dt_ctrl: f64,
+    substeps: usize,
+    wind_a: WindModel,
+    wind_b: WindModel,
+    obs_noise: ObservationNoise,
+    rng: rand::rngs::StdRng,
+    /// EKF: drone A tracking drone B
+    ekf_a: EKF,
+    /// EKF: drone B tracking drone A
+    ekf_b: EKF,
+    /// Particle filter: drone A tracking drone B (for occlusion)
+    pf_a: ParticleFilter,
+    /// Particle filter: drone B tracking drone A (for occlusion)
+    pf_b: ParticleFilter,
+    /// Time since A last saw B
+    time_since_a_saw_b: f64,
+    /// Time since B last saw A
+    time_since_b_saw_a: f64,
+    // --- Level 4: Camera ---
+    camera_params: Option<CameraParams>,
+    /// Cached last camera frame for drone A (reused between renders).
+    last_frame_a: Option<CameraFrame>,
+    /// Cached last camera frame for drone B.
+    last_frame_b: Option<CameraFrame>,
+    /// Cached last detection for drone A.
+    last_det_a: Option<Detection>,
+    /// Cached last detection for drone B.
+    last_det_b: Option<Detection>,
+    /// Elapsed sim time since last camera render for A.
+    cam_time_since_render_a: f64,
+    /// Elapsed sim time since last camera render for B.
+    cam_time_since_render_b: f64,
+    /// Simulation clock (total elapsed time).
+    sim_time: f64,
+    /// Opponent radius for SDF and detection.
+    cam_drone_radius: f64,
+    /// Min confidence distance for detection.
+    cam_min_conf_dist: f64,
+    /// Safety envelope
+    safety: SafetyEnvelope,
+}
+
+fn build_arena(bounds: [f64; 3], obstacles: Vec<([f64; 3], [f64; 3])>, drone_radius: f64) -> Arena {
+    let mut arena = Arena::new(Vector3::new(bounds[0], bounds[1], bounds[2]));
+    arena.drone_radius = drone_radius;
+    for (center, half_ext) in obstacles {
+        arena.obstacles.push(Obstacle::Box {
+            center: Vector3::new(center[0], center[1], center[2]),
+            half_extents: Vector3::new(half_ext[0], half_ext[1], half_ext[2]),
+        });
+    }
+    arena
+}
+
+fn build_params(
+    mass: f64,
+    arm_length: f64,
+    inertia: [f64; 3],
+    max_thrust: f64,
+    torque_coeff: f64,
+    drag_coeff: f64,
+) -> DroneParams {
+    DroneParams {
+        mass,
+        arm_length,
+        inertia: Vector3::new(inertia[0], inertia[1], inertia[2]),
+        max_thrust,
+        torque_coeff,
+        drag_coeff,
+        gravity: 9.81,
+    }
+}
+
+fn euler_from_quat(state: &DroneState) -> [f64; 3] {
+    let (roll, pitch, yaw) = state.attitude.euler_angles();
+    [roll, pitch, yaw]
+}
+
+fn v3(a: [f64; 3]) -> Vector3<f64> {
+    Vector3::new(a[0], a[1], a[2])
+}
+
+#[pymethods]
+impl Simulation {
+    #[new]
+    #[pyo3(signature = (
+        bounds,
+        obstacles,
+        mass = 0.027,
+        arm_length = 0.04,
+        inertia = [1.4e-5, 1.4e-5, 2.17e-5],
+        max_thrust = 0.15,
+        torque_coeff = 0.005964,
+        drag_coeff = 0.01,
+        fov = std::f64::consts::FRAC_PI_2,
+        lock_distance = 2.0,
+        lock_duration = 1.5,
+        dt_ctrl = 0.01,
+        substeps = 10,
+        drone_radius = 0.05,
+        wind_theta = 0.0,
+        wind_mu = [0.0, 0.0, 0.0],
+        wind_sigma = 0.0,
+        obs_noise_std = 0.0,
+        camera_enabled = false,
+        camera_width = 320,
+        camera_height = 240,
+        camera_fov_deg = 90.0,
+        camera_max_depth = 15.0,
+        camera_render_hz = 30.0,
+        camera_min_conf_dist = 5.0,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        bounds: [f64; 3],
+        obstacles: Vec<([f64; 3], [f64; 3])>,
+        mass: f64,
+        arm_length: f64,
+        inertia: [f64; 3],
+        max_thrust: f64,
+        torque_coeff: f64,
+        drag_coeff: f64,
+        fov: f64,
+        lock_distance: f64,
+        lock_duration: f64,
+        dt_ctrl: f64,
+        substeps: usize,
+        drone_radius: f64,
+        wind_theta: f64,
+        wind_mu: [f64; 3],
+        wind_sigma: f64,
+        obs_noise_std: f64,
+        camera_enabled: bool,
+        camera_width: usize,
+        camera_height: usize,
+        camera_fov_deg: f64,
+        camera_max_depth: f64,
+        camera_render_hz: f64,
+        camera_min_conf_dist: f64,
+    ) -> Self {
+        let arena = build_arena(bounds, obstacles, drone_radius);
+        let params = build_params(
+            mass,
+            arm_length,
+            inertia,
+            max_thrust,
+            torque_coeff,
+            drag_coeff,
+        );
+        let lock_params = LockOnParams {
+            fov,
+            lock_distance,
+            lock_duration,
+        };
+
+        let wind_enabled = wind_sigma > 0.0;
+        let mu = Vector3::new(wind_mu[0], wind_mu[1], wind_mu[2]);
+        let mut wind_a = WindModel::new(wind_theta, mu, wind_sigma);
+        let mut wind_b = WindModel::new(wind_theta, mu, wind_sigma);
+        wind_a.enabled = wind_enabled;
+        wind_b.enabled = wind_enabled;
+
+        let obs_noise = ObservationNoise::new(obs_noise_std);
+
+        // EKF: each drone tracks opponent. Use obs_noise_std as measurement noise.
+        let ekf_noise = if obs_noise_std > 0.0 {
+            obs_noise_std
+        } else {
+            0.1
+        };
+        let ekf_a = EKF::new(Vector3::zeros(), ekf_noise);
+        let ekf_b = EKF::new(Vector3::zeros(), ekf_noise);
+
+        // Particle filters for belief tracking during occlusion
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut pf_a = ParticleFilter::new(Vector3::zeros(), 200, 2.0, ekf_noise, &mut rng);
+        let mut pf_b = ParticleFilter::new(Vector3::zeros(), 200, 2.0, ekf_noise, &mut rng);
+        pf_a.set_bounds(Vector3::zeros(), arena.bounds);
+        pf_b.set_bounds(Vector3::zeros(), arena.bounds);
+
+        let camera_params = if camera_enabled {
+            Some(CameraParams::new(
+                camera_width,
+                camera_height,
+                camera_fov_deg,
+                camera_max_depth,
+                camera_render_hz,
+            ))
+        } else {
+            None
+        };
+
+        Self {
+            arena,
+            params,
+            drone_a: DroneState::default(),
+            drone_b: DroneState::default(),
+            lock_a: LockOnTracker::new(lock_params.clone()),
+            lock_b: LockOnTracker::new(lock_params),
+            dt_ctrl,
+            substeps,
+            wind_a,
+            wind_b,
+            obs_noise,
+            rng,
+            ekf_a,
+            ekf_b,
+            pf_a,
+            pf_b,
+            time_since_a_saw_b: 0.0,
+            time_since_b_saw_a: 0.0,
+            camera_params,
+            last_frame_a: None,
+            last_frame_b: None,
+            last_det_a: None,
+            last_det_b: None,
+            cam_time_since_render_a: f64::INFINITY, // force first render
+            cam_time_since_render_b: f64::INFINITY,
+            sim_time: 0.0,
+            cam_drone_radius: drone_radius,
+            cam_min_conf_dist: camera_min_conf_dist,
+            safety: SafetyEnvelope::crazyflie(),
+        }
+    }
+
+    /// Reset both drones to hover at given positions. Returns (state_a, state_b).
+    fn reset(&mut self, pos_a: [f64; 3], pos_b: [f64; 3]) -> ([f64; 13], [f64; 13]) {
+        self.drone_a = DroneState::hover_at(v3(pos_a));
+        self.drone_b = DroneState::hover_at(v3(pos_b));
+        self.lock_a.reset();
+        self.lock_b.reset();
+        self.wind_a.reset();
+        self.wind_b.reset();
+        // Reset EKFs: A tracks B, B tracks A
+        self.ekf_a.reset(v3(pos_b));
+        self.ekf_b.reset(v3(pos_a));
+        // Reset particle filters
+        let mut pf_a = ParticleFilter::new(
+            v3(pos_b),
+            200,
+            2.0,
+            self.obs_noise.std_dev.max(0.1),
+            &mut self.rng,
+        );
+        let mut pf_b = ParticleFilter::new(
+            v3(pos_a),
+            200,
+            2.0,
+            self.obs_noise.std_dev.max(0.1),
+            &mut self.rng,
+        );
+        pf_a.set_bounds(Vector3::zeros(), self.arena.bounds);
+        pf_b.set_bounds(Vector3::zeros(), self.arena.bounds);
+        self.pf_a = pf_a;
+        self.pf_b = pf_b;
+        self.time_since_a_saw_b = 0.0;
+        self.time_since_b_saw_a = 0.0;
+        // Reset camera state
+        self.last_frame_a = None;
+        self.last_frame_b = None;
+        self.last_det_a = None;
+        self.last_det_b = None;
+        self.cam_time_since_render_a = f64::INFINITY;
+        self.cam_time_since_render_b = f64::INFINITY;
+        self.sim_time = 0.0;
+        (self.drone_a.to_array(), self.drone_b.to_array())
+    }
+
+    /// Advance one control step. motors_a/b are [f1,f2,f3,f4] in Newtons.
+    fn step(&mut self, motors_a: [f64; 4], motors_b: [f64; 4]) -> StepResult {
+        let raw_a = Vector4::new(motors_a[0], motors_a[1], motors_a[2], motors_a[3]);
+        let raw_b = Vector4::new(motors_b[0], motors_b[1], motors_b[2], motors_b[3]);
+        // Safety: sanitize NaN/Inf motors
+        let ua = self
+            .safety
+            .sanitize_motors(raw_a, &self.drone_a, &self.params);
+        let ub = self
+            .safety
+            .sanitize_motors(raw_b, &self.drone_b, &self.params);
+
+        // Sub-step integration with wind
+        let dt_sim = self.dt_ctrl / self.substeps as f64;
+        for _ in 0..self.substeps {
+            let wind_force_a = self.wind_a.step(dt_sim, &mut self.rng);
+            let wind_force_b = self.wind_b.step(dt_sim, &mut self.rng);
+            self.drone_a = step_rk4(&self.drone_a, &ua, &self.params, dt_sim, &wind_force_a);
+            self.drone_b = step_rk4(&self.drone_b, &ub, &self.params, dt_sim, &wind_force_b);
+        }
+
+        // Lock-on updates
+        let kill_a = self
+            .lock_a
+            .update(&self.drone_a, &self.drone_b, &self.arena, self.dt_ctrl);
+        let kill_b = self
+            .lock_b
+            .update(&self.drone_b, &self.drone_a, &self.arena, self.dt_ctrl);
+
+        let fwd_a = self.drone_a.forward();
+        let fwd_b = self.drone_b.forward();
+
+        // --- Visibility checks ---
+        let a_sees_b =
+            check_line_of_sight(&self.arena, &self.drone_a.position, &self.drone_b.position)
+                == Visibility::Visible;
+        let b_sees_a =
+            check_line_of_sight(&self.arena, &self.drone_b.position, &self.drone_a.position)
+                == Visibility::Visible;
+
+        // --- Noisy observations (only generated when visible) ---
+        let noisy_b = if a_sees_b {
+            self.obs_noise.apply(&self.drone_b.position, &mut self.rng)
+        } else {
+            Vector3::zeros() // placeholder, won't be used for EKF update
+        };
+        let noisy_a = if b_sees_a {
+            self.obs_noise.apply(&self.drone_a.position, &mut self.rng)
+        } else {
+            Vector3::zeros()
+        };
+
+        // --- EKF: predict always, update only when visible ---
+        self.ekf_a.predict(self.dt_ctrl);
+        if a_sees_b {
+            self.ekf_a.update(&noisy_b);
+        }
+        let ekf_b_pos = self.ekf_a.position();
+        let ekf_b_vel = self.ekf_a.velocity();
+
+        self.ekf_b.predict(self.dt_ctrl);
+        if b_sees_a {
+            self.ekf_b.update(&noisy_a);
+        }
+        let ekf_a_pos = self.ekf_b.position();
+        let ekf_a_vel = self.ekf_b.velocity();
+
+        // --- Particle filter: predict with SDF constraints, update only when visible ---
+        // Temporarily extract rng to avoid borrow conflicts with self.pf_a/pf_b/arena
+        let mut rng = std::mem::replace(&mut self.rng, rand::rngs::StdRng::seed_from_u64(0));
+
+        {
+            let arena = &self.arena;
+            self.pf_a
+                .predict_with_sdf(self.dt_ctrl, |p| arena.sdf(p), &mut rng);
+        }
+        if a_sees_b {
+            self.pf_a.update(&noisy_b, &mut rng);
+            self.time_since_a_saw_b = 0.0;
+        } else {
+            self.time_since_a_saw_b += self.dt_ctrl;
+        }
+
+        {
+            let arena = &self.arena;
+            self.pf_b
+                .predict_with_sdf(self.dt_ctrl, |p| arena.sdf(p), &mut rng);
+        }
+        if b_sees_a {
+            self.pf_b.update(&noisy_a, &mut rng);
+            self.time_since_b_saw_a = 0.0;
+        } else {
+            self.time_since_b_saw_a += self.dt_ctrl;
+        }
+
+        // Restore the rng
+        self.rng = rng;
+
+        // --- Belief state: use EKF when visible, particle filter when occluded ---
+        let (belief_b_pos, belief_b_var) = if a_sees_b {
+            (ekf_b_pos, 0.0)
+        } else {
+            (self.pf_a.mean_position(), self.pf_a.position_variance())
+        };
+
+        let (belief_a_pos, belief_a_var) = if b_sees_a {
+            (ekf_a_pos, 0.0)
+        } else {
+            (self.pf_b.mean_position(), self.pf_b.position_variance())
+        };
+
+        let wf_a = self.wind_a.force;
+        let wf_b = self.wind_b.force;
+
+        // --- Level 4: Camera rendering + detection ---
+        self.sim_time += self.dt_ctrl;
+        self.cam_time_since_render_a += self.dt_ctrl;
+        self.cam_time_since_render_b += self.dt_ctrl;
+
+        let mut camera_rendered_a = false;
+        let mut camera_rendered_b = false;
+        let mut depth_image_a: Option<Vec<f32>> = None;
+        let mut depth_image_b: Option<Vec<f32>> = None;
+
+        if let Some(ref cam) = self.camera_params {
+            let render_interval = 1.0 / cam.render_hz;
+
+            // Drone A camera
+            if self.cam_time_since_render_a >= render_interval {
+                let rot_a = self.drone_a.attitude.to_rotation_matrix();
+                let frame = render_depth(
+                    cam,
+                    &self.arena,
+                    &self.drone_a.position,
+                    &rot_a,
+                    &self.drone_b.position,
+                    self.cam_drone_radius,
+                    self.sim_time,
+                );
+                let det = detect_opponent(
+                    cam,
+                    &self.arena,
+                    &self.drone_a.position,
+                    &rot_a,
+                    &self.drone_b.position,
+                    self.cam_drone_radius,
+                    self.cam_min_conf_dist,
+                );
+                depth_image_a = Some(frame.depth.clone());
+                self.last_frame_a = Some(frame);
+                self.last_det_a = Some(det);
+                self.cam_time_since_render_a = 0.0;
+                camera_rendered_a = true;
+            }
+
+            // Drone B camera
+            if self.cam_time_since_render_b >= render_interval {
+                let rot_b = self.drone_b.attitude.to_rotation_matrix();
+                let frame = render_depth(
+                    cam,
+                    &self.arena,
+                    &self.drone_b.position,
+                    &rot_b,
+                    &self.drone_a.position,
+                    self.cam_drone_radius,
+                    self.sim_time,
+                );
+                let det = detect_opponent(
+                    cam,
+                    &self.arena,
+                    &self.drone_b.position,
+                    &rot_b,
+                    &self.drone_a.position,
+                    self.cam_drone_radius,
+                    self.cam_min_conf_dist,
+                );
+                depth_image_b = Some(frame.depth.clone());
+                self.last_frame_b = Some(frame);
+                self.last_det_b = Some(det);
+                self.cam_time_since_render_b = 0.0;
+                camera_rendered_b = true;
+            }
+        }
+
+        let det_a = self.last_det_a.as_ref();
+        let det_b = self.last_det_b.as_ref();
+
+        StepResult {
+            drone_a_state: self.drone_a.to_array(),
+            drone_b_state: self.drone_b.to_array(),
+            drone_a_forward: [fwd_a.x, fwd_a.y, fwd_a.z],
+            drone_b_forward: [fwd_b.x, fwd_b.y, fwd_b.z],
+            drone_a_euler: euler_from_quat(&self.drone_a),
+            drone_b_euler: euler_from_quat(&self.drone_b),
+            drone_a_collision: self.arena.is_collision(&self.drone_a.position),
+            drone_a_oob: self.arena.is_out_of_bounds(&self.drone_a.position),
+            drone_b_collision: self.arena.is_collision(&self.drone_b.position),
+            drone_b_oob: self.arena.is_out_of_bounds(&self.drone_b.position),
+            lock_a_progress: self.lock_a.progress(),
+            lock_b_progress: self.lock_b.progress(),
+            kill_a,
+            kill_b,
+            distance: self.drone_a.distance_to(&self.drone_b),
+            nearest_obs_dist_a: self.arena.obstacle_sdf(&self.drone_a.position),
+            nearest_obs_dist_b: self.arena.obstacle_sdf(&self.drone_b.position),
+            noisy_b_pos_from_a: [noisy_b.x, noisy_b.y, noisy_b.z],
+            noisy_a_pos_from_b: [noisy_a.x, noisy_a.y, noisy_a.z],
+            wind_force_a: [wf_a.x, wf_a.y, wf_a.z],
+            wind_force_b: [wf_b.x, wf_b.y, wf_b.z],
+            ekf_b_pos_from_a: [ekf_b_pos.x, ekf_b_pos.y, ekf_b_pos.z],
+            ekf_b_vel_from_a: [ekf_b_vel.x, ekf_b_vel.y, ekf_b_vel.z],
+            ekf_a_pos_from_b: [ekf_a_pos.x, ekf_a_pos.y, ekf_a_pos.z],
+            ekf_a_vel_from_b: [ekf_a_vel.x, ekf_a_vel.y, ekf_a_vel.z],
+            a_sees_b,
+            b_sees_a,
+            time_since_a_saw_b: self.time_since_a_saw_b,
+            time_since_b_saw_a: self.time_since_b_saw_a,
+            belief_b_pos_from_a: [belief_b_pos.x, belief_b_pos.y, belief_b_pos.z],
+            belief_b_var_from_a: belief_b_var,
+            belief_a_pos_from_b: [belief_a_pos.x, belief_a_pos.y, belief_a_pos.z],
+            belief_a_var_from_b: belief_a_var,
+            // Camera / detection
+            depth_image_a,
+            depth_image_b,
+            camera_rendered_a,
+            camera_rendered_b,
+            det_a_detected: det_a.is_some_and(|d| d.detected),
+            det_a_bbox: det_a.map_or([0.0; 4], |d| d.bbox),
+            det_a_confidence: det_a.map_or(0.0, |d| d.confidence),
+            det_a_depth: det_a.map_or(0.0, |d| d.depth),
+            det_a_pixel_center: det_a.map_or([0.0; 2], |d| d.pixel_center),
+            det_b_detected: det_b.is_some_and(|d| d.detected),
+            det_b_bbox: det_b.map_or([0.0; 4], |d| d.bbox),
+            det_b_confidence: det_b.map_or(0.0, |d| d.confidence),
+            det_b_depth: det_b.map_or(0.0, |d| d.depth),
+            det_b_pixel_center: det_b.map_or([0.0; 2], |d| d.pixel_center),
+            // Safety
+            safety_a: self.safety.check(&self.drone_a, &self.arena).severity as u8,
+            safety_b: self.safety.check(&self.drone_b, &self.arena).severity as u8,
+        }
+    }
+
+    /// Hover thrust per motor (N).
+    fn hover_thrust(&self) -> f64 {
+        self.params.hover_thrust()
+    }
+
+    /// Max thrust per motor (N).
+    fn max_thrust(&self) -> f64 {
+        self.params.max_thrust
+    }
+
+    /// Current state arrays.
+    fn drone_a_state(&self) -> [f64; 13] {
+        self.drone_a.to_array()
+    }
+
+    fn drone_b_state(&self) -> [f64; 13] {
+        self.drone_b.to_array()
+    }
+
+    /// SDF at a point (for debugging / observation).
+    fn arena_sdf(&self, point: [f64; 3]) -> f64 {
+        self.arena.sdf(&v3(point))
+    }
+
+    /// Get particle filter positions for visualization (A's belief about B).
+    fn belief_particles_a(&self) -> Vec<[f64; 3]> {
+        self.pf_a.particle_positions()
+    }
+
+    /// Get particle filter positions for visualization (B's belief about A).
+    fn belief_particles_b(&self) -> Vec<[f64; 3]> {
+        self.pf_b.particle_positions()
+    }
+
+    /// Get camera intrinsics (fx, fy, cx, cy). Returns None if camera is disabled.
+    fn camera_intrinsics(&self) -> Option<(f64, f64, f64, f64)> {
+        self.camera_params
+            .as_ref()
+            .map(|c| (c.fx, c.fy, c.cx, c.cy))
+    }
+
+    /// Get camera image dimensions (width, height). Returns None if camera is disabled.
+    fn camera_resolution(&self) -> Option<(usize, usize)> {
+        self.camera_params.as_ref().map(|c| (c.width, c.height))
+    }
+
+    /// Get camera max depth. Returns None if camera is disabled.
+    fn camera_max_depth(&self) -> Option<f64> {
+        self.camera_params.as_ref().map(|c| c.max_depth)
+    }
+
+    /// Check line-of-sight between two arbitrary points.
+    /// Returns true if visible, false if occluded by obstacles.
+    fn check_los(&self, pos_a: [f64; 3], pos_b: [f64; 3]) -> bool {
+        check_line_of_sight(&self.arena, &v3(pos_a), &v3(pos_b)) == Visibility::Visible
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MppiController — wraps the MPPI optimizer for Python
+// ---------------------------------------------------------------------------
+
+#[pyclass]
+struct MppiController {
+    optimizer: MppiOptimizer,
+}
+
+#[pymethods]
+impl MppiController {
+    #[new]
+    #[pyo3(signature = (
+        bounds,
+        obstacles,
+        num_samples = 1024,
+        horizon = 50,
+        noise_std = 0.03,
+        temperature = 10.0,
+        mass = 0.027,
+        arm_length = 0.04,
+        inertia = [1.4e-5, 1.4e-5, 2.17e-5],
+        max_thrust = 0.15,
+        torque_coeff = 0.005964,
+        drag_coeff = 0.01,
+        dt_ctrl = 0.01,
+        substeps = 10,
+        drone_radius = 0.05,
+        w_dist = 1.0,
+        w_face = 5.0,
+        w_ctrl = 0.01,
+        w_obs = 1000.0,
+        d_safe = 0.3,
+        risk_wind_theta = 0.0,
+        risk_wind_sigma = 0.0,
+        risk_cvar_alpha = 0.0,
+        risk_cvar_penalty = 0.0,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        bounds: [f64; 3],
+        obstacles: Vec<([f64; 3], [f64; 3])>,
+        num_samples: usize,
+        horizon: usize,
+        noise_std: f64,
+        temperature: f64,
+        mass: f64,
+        arm_length: f64,
+        inertia: [f64; 3],
+        max_thrust: f64,
+        torque_coeff: f64,
+        drag_coeff: f64,
+        dt_ctrl: f64,
+        substeps: usize,
+        drone_radius: f64,
+        w_dist: f64,
+        w_face: f64,
+        w_ctrl: f64,
+        w_obs: f64,
+        d_safe: f64,
+        risk_wind_theta: f64,
+        risk_wind_sigma: f64,
+        risk_cvar_alpha: f64,
+        risk_cvar_penalty: f64,
+    ) -> Self {
+        let arena = build_arena(bounds, obstacles, drone_radius);
+        let params = build_params(
+            mass,
+            arm_length,
+            inertia,
+            max_thrust,
+            torque_coeff,
+            drag_coeff,
+        );
+        let weights = CostWeights {
+            w_dist,
+            w_face,
+            w_ctrl,
+            w_obs,
+            d_safe,
+        };
+        let mut optimizer = MppiOptimizer::new(
+            num_samples,
+            horizon,
+            noise_std,
+            temperature,
+            params,
+            arena,
+            weights,
+            dt_ctrl,
+            substeps,
+        );
+
+        // Enable risk-aware mode if wind_sigma > 0
+        if risk_wind_sigma > 0.0 {
+            optimizer.set_risk_config(RiskConfig {
+                wind: WindModel::new(risk_wind_theta, Vector3::zeros(), risk_wind_sigma),
+                cvar_alpha: risk_cvar_alpha,
+                cvar_penalty: risk_cvar_penalty,
+            });
+        }
+
+        Self { optimizer }
+    }
+
+    /// Compute optimal motor thrusts [f1,f2,f3,f4] given 13-element state arrays.
+    fn compute_action(
+        &mut self,
+        self_state: [f64; 13],
+        enemy_state: [f64; 13],
+        pursuit: bool,
+    ) -> [f64; 4] {
+        let s = DroneState::from_array(&self_state);
+        let e = DroneState::from_array(&enemy_state);
+        let a = self.optimizer.compute_action(&s, &e, pursuit);
+        [a[0], a[1], a[2], a[3]]
+    }
+
+    /// Compute optimal motor thrusts with belief-weighted costs (Level 3).
+    ///
+    /// `belief_var` is the position variance from the particle filter.
+    /// When high, the controller plans conservatively.
+    fn compute_action_with_belief(
+        &mut self,
+        self_state: [f64; 13],
+        enemy_state: [f64; 13],
+        pursuit: bool,
+        belief_var: f64,
+    ) -> [f64; 4] {
+        let s = DroneState::from_array(&self_state);
+        let e = DroneState::from_array(&enemy_state);
+        let a = self
+            .optimizer
+            .compute_action_with_belief(&s, &e, pursuit, belief_var);
+        [a[0], a[1], a[2], a[3]]
+    }
+
+    /// Reset warm-start state.
+    fn reset(&mut self) {
+        self.optimizer.reset();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Module registration
+// ---------------------------------------------------------------------------
+
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", "0.1.0")?;
+    m.add_class::<StepResult>()?;
+    m.add_class::<Simulation>()?;
+    m.add_class::<MppiController>()?;
+    Ok(())
+}

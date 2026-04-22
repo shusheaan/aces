@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "aces"
+version = "0.1.0"
+description = "Air Combat Engagement Simulation — quadrotor dogfight with RL and MPPI"
+authors = ["shusheaan"]
+packages = [{include = "aces"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.15"
+gymnasium = ">=0.29"
+stable-baselines3 = ">=2.0"
+numpy = ">=1.24"
+torch = ">=2.0"
+rerun-sdk = ">=0.18"
+tensorboard = ">=2.14"
+maturin = ">=1.5,<2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+ruff = ">=0.4"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.maturin]
+python-source = "."
+module-name = "aces._core"
+manifest-path = "crates/py-bridge/Cargo.toml"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
