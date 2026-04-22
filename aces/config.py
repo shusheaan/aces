@@ -100,6 +100,20 @@ class NoiseConfig:
     wind_mu: list[float]
     wind_sigma: float
     obs_noise_std: float
+    motor_time_constant: float = 0.0
+    motor_noise_std: float = 0.0
+    motor_bias_range: float = 0.0
+    imu_accel_bias_std: float = 0.0
+    imu_gyro_bias_std: float = 0.0
+
+
+@dataclass(frozen=True)
+class DomainRandomizationConfig:
+    enabled: bool = False
+    mass_range: float = 0.0
+    inertia_range: float = 0.0
+    max_thrust_range: float = 0.0
+    drag_range: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -156,6 +170,7 @@ class RulesConfig:
     detection: DetectionConfig
     reward: RewardConfig
     training: TrainingConfig
+    domain_randomization: DomainRandomizationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +274,20 @@ def _parse_rules(data: dict) -> RulesConfig:
         wind_mu=noise_raw["wind_mu"],
         wind_sigma=noise_raw["wind_sigma"],
         obs_noise_std=noise_raw["obs_noise_std"],
+        motor_time_constant=noise_raw.get("motor_time_constant", 0.0),
+        motor_noise_std=noise_raw.get("motor_noise_std", 0.0),
+        motor_bias_range=noise_raw.get("motor_bias_range", 0.0),
+        imu_accel_bias_std=noise_raw.get("imu_accel_bias_std", 0.0),
+        imu_gyro_bias_std=noise_raw.get("imu_gyro_bias_std", 0.0),
+    )
+
+    dr_raw = data.get("domain_randomization", {})
+    domain_randomization = DomainRandomizationConfig(
+        enabled=dr_raw.get("enabled", False),
+        mass_range=dr_raw.get("mass_range", 0.0),
+        inertia_range=dr_raw.get("inertia_range", 0.0),
+        max_thrust_range=dr_raw.get("max_thrust_range", 0.0),
+        drag_range=dr_raw.get("drag_range", 0.0),
     )
 
     cam_raw = data["camera"]
@@ -314,6 +343,7 @@ def _parse_rules(data: dict) -> RulesConfig:
         detection=detection,
         reward=reward,
         training=training,
+        domain_randomization=domain_randomization,
     )
 
 

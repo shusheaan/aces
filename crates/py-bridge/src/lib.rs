@@ -3,12 +3,14 @@ use pyo3::prelude::*;
 use aces_estimator::ekf::EKF;
 use aces_estimator::particle_filter::ParticleFilter;
 use aces_mppi::cost::CostWeights;
-use aces_mppi::optimizer::{MppiOptimizer, RiskConfig};
+use aces_mppi::optimizer::{ChanceConstraintConfig, MppiOptimizer, RiskConfig};
+use aces_sim_core::actuator::ActuatorModel;
 use aces_sim_core::camera::{render_depth, CameraFrame, CameraParams};
 use aces_sim_core::collision::{check_line_of_sight, Visibility};
 use aces_sim_core::detection::{detect_opponent, Detection};
 use aces_sim_core::dynamics::{step_rk4, DroneParams};
 use aces_sim_core::environment::{Arena, Obstacle};
+use aces_sim_core::imu_bias::ImuBias;
 use aces_sim_core::lockon::{LockOnParams, LockOnTracker};
 use aces_sim_core::noise::ObservationNoise;
 use aces_sim_core::safety::SafetyEnvelope;
@@ -97,6 +99,14 @@ struct StepResult {
     // Safety: 0=Ok, 1=Warning, 2=Critical
     safety_a: u8,
     safety_b: u8,
+    /// EKF covariance diagonal for A tracking B [P_px, P_py, P_pz, P_vx, P_vy, P_vz]
+    ekf_a_cov_diag: [f64; 6],
+    /// EKF last innovation for A tracking B [ix, iy, iz]
+    ekf_a_innovation: [f64; 3],
+    /// IMU accel bias on drone A
+    imu_accel_bias_a: [f64; 3],
+    /// IMU gyro bias on drone A
+    imu_gyro_bias_a: [f64; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +161,11 @@ struct Simulation {
     cam_min_conf_dist: f64,
     /// Safety envelope
     safety: SafetyEnvelope,
+    actuator_a: ActuatorModel,
+    actuator_b: ActuatorModel,
+    imu_bias_a: ImuBias,
+    imu_bias_b: ImuBias,
+    motor_bias_range: f64,
 }
 
 fn build_arena(bounds: [f64; 3], obstacles: Vec<([f64; 3], [f64; 3])>, drone_radius: f64) -> Arena {
@@ -222,6 +237,11 @@ impl Simulation {
         camera_max_depth = 15.0,
         camera_render_hz = 30.0,
         camera_min_conf_dist = 5.0,
+        motor_time_constant = 0.0,
+        motor_noise_std = 0.0,
+        motor_bias_range = 0.0,
+        imu_accel_bias_std = 0.0,
+        imu_gyro_bias_std = 0.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -250,6 +270,11 @@ impl Simulation {
         camera_max_depth: f64,
         camera_render_hz: f64,
         camera_min_conf_dist: f64,
+        motor_time_constant: f64,
+        motor_noise_std: f64,
+        motor_bias_range: f64,
+        imu_accel_bias_std: f64,
+        imu_gyro_bias_std: f64,
     ) -> Self {
         let arena = build_arena(bounds, obstacles, drone_radius);
         let params = build_params(
@@ -290,6 +315,11 @@ impl Simulation {
         let mut pf_b = ParticleFilter::new(Vector3::zeros(), 200, 2.0, ekf_noise, &mut rng);
         pf_a.set_bounds(Vector3::zeros(), arena.bounds);
         pf_b.set_bounds(Vector3::zeros(), arena.bounds);
+
+        let actuator_a = ActuatorModel::new(motor_time_constant, motor_noise_std);
+        let actuator_b = ActuatorModel::new(motor_time_constant, motor_noise_std);
+        let imu_bias_a = ImuBias::new(imu_accel_bias_std, imu_gyro_bias_std);
+        let imu_bias_b = ImuBias::new(imu_accel_bias_std, imu_gyro_bias_std);
 
         let camera_params = if camera_enabled {
             Some(CameraParams::new(
@@ -333,6 +363,11 @@ impl Simulation {
             cam_drone_radius: drone_radius,
             cam_min_conf_dist: camera_min_conf_dist,
             safety: SafetyEnvelope::crazyflie(),
+            actuator_a,
+            actuator_b,
+            imu_bias_a,
+            imu_bias_b,
+            motor_bias_range,
         }
     }
 
@@ -368,6 +403,16 @@ impl Simulation {
         self.pf_b = pf_b;
         self.time_since_a_saw_b = 0.0;
         self.time_since_b_saw_a = 0.0;
+        self.actuator_a.reset();
+        self.actuator_b.reset();
+        if self.motor_bias_range > 0.0 {
+            self.actuator_a
+                .randomize_bias(self.motor_bias_range, &mut self.rng);
+            self.actuator_b
+                .randomize_bias(self.motor_bias_range, &mut self.rng);
+        }
+        self.imu_bias_a.reset();
+        self.imu_bias_b.reset();
         // Reset camera state
         self.last_frame_a = None;
         self.last_frame_b = None;
@@ -396,8 +441,22 @@ impl Simulation {
         for _ in 0..self.substeps {
             let wind_force_a = self.wind_a.step(dt_sim, &mut self.rng);
             let wind_force_b = self.wind_b.step(dt_sim, &mut self.rng);
-            self.drone_a = step_rk4(&self.drone_a, &ua, &self.params, dt_sim, &wind_force_a);
-            self.drone_b = step_rk4(&self.drone_b, &ub, &self.params, dt_sim, &wind_force_b);
+            let actual_a = self.actuator_a.apply(&ua, dt_sim, &mut self.rng);
+            let actual_b = self.actuator_b.apply(&ub, dt_sim, &mut self.rng);
+            self.drone_a = step_rk4(
+                &self.drone_a,
+                &actual_a,
+                &self.params,
+                dt_sim,
+                &wind_force_a,
+            );
+            self.drone_b = step_rk4(
+                &self.drone_b,
+                &actual_b,
+                &self.params,
+                dt_sim,
+                &wind_force_b,
+            );
         }
 
         // Lock-on updates
@@ -430,6 +489,21 @@ impl Simulation {
         } else {
             Vector3::zeros()
         };
+
+        // IMU bias random walk step
+        let zero3 = Vector3::zeros();
+        let (_biased_accel_a, _biased_gyro_a) = self.imu_bias_a.apply(
+            &zero3,
+            &self.drone_a.angular_velocity,
+            self.dt_ctrl,
+            &mut self.rng,
+        );
+        let (_biased_accel_b, _biased_gyro_b) = self.imu_bias_b.apply(
+            &zero3,
+            &self.drone_b.angular_velocity,
+            self.dt_ctrl,
+            &mut self.rng,
+        );
 
         // --- EKF: predict always, update only when visible ---
         self.ekf_a.predict(self.dt_ctrl);
@@ -618,6 +692,22 @@ impl Simulation {
             // Safety
             safety_a: self.safety.check(&self.drone_a, &self.arena).severity as u8,
             safety_b: self.safety.check(&self.drone_b, &self.arena).severity as u8,
+            ekf_a_cov_diag: self.ekf_a.covariance_diagonal(),
+            ekf_a_innovation: self
+                .ekf_a
+                .last_innovation()
+                .map(|v| [v.x, v.y, v.z])
+                .unwrap_or([0.0; 3]),
+            imu_accel_bias_a: [
+                self.imu_bias_a.accel_bias.x,
+                self.imu_bias_a.accel_bias.y,
+                self.imu_bias_a.accel_bias.z,
+            ],
+            imu_gyro_bias_a: [
+                self.imu_bias_a.gyro_bias.x,
+                self.imu_bias_a.gyro_bias.y,
+                self.imu_bias_a.gyro_bias.z,
+            ],
         }
     }
 
@@ -716,6 +806,9 @@ impl MppiController {
         risk_wind_sigma = 0.0,
         risk_cvar_alpha = 0.0,
         risk_cvar_penalty = 0.0,
+        cc_delta = None,
+        cc_lambda_lr = 0.1,
+        cc_lambda_init = 100.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -743,6 +836,9 @@ impl MppiController {
         risk_wind_sigma: f64,
         risk_cvar_alpha: f64,
         risk_cvar_penalty: f64,
+        cc_delta: Option<f64>,
+        cc_lambda_lr: f64,
+        cc_lambda_init: f64,
     ) -> Self {
         let arena = build_arena(bounds, obstacles, drone_radius);
         let params = build_params(
@@ -778,6 +874,17 @@ impl MppiController {
                 wind: WindModel::new(risk_wind_theta, Vector3::zeros(), risk_wind_sigma),
                 cvar_alpha: risk_cvar_alpha,
                 cvar_penalty: risk_cvar_penalty,
+            });
+        }
+
+        // Enable chance constraint if cc_delta is provided
+        if let Some(delta) = cc_delta {
+            optimizer.set_chance_constraint(ChanceConstraintConfig {
+                delta,
+                lambda_lr: cc_lambda_lr,
+                lambda_init: cc_lambda_init,
+                lambda_min: 0.0,
+                lambda_max: 1e6,
             });
         }
 

@@ -25,6 +25,33 @@ pub struct RiskConfig {
     pub cvar_penalty: f64,
 }
 
+/// Configuration for chance-constrained MPPI.
+#[derive(Clone, Debug)]
+pub struct ChanceConstraintConfig {
+    /// Maximum allowed collision probability (e.g., 0.01 = 1%)
+    pub delta: f64,
+    /// Lagrange multiplier learning rate
+    pub lambda_lr: f64,
+    /// Initial Lagrange multiplier
+    pub lambda_init: f64,
+    /// Minimum lambda (prevent negative)
+    pub lambda_min: f64,
+    /// Maximum lambda (prevent explosion)
+    pub lambda_max: f64,
+}
+
+impl Default for ChanceConstraintConfig {
+    fn default() -> Self {
+        Self {
+            delta: 0.01,
+            lambda_lr: 0.1,
+            lambda_init: 100.0,
+            lambda_min: 0.0,
+            lambda_max: 1e6,
+        }
+    }
+}
+
 /// Full MPPI optimizer: sample, rollout, cost, softmax-weight, update mean.
 ///
 /// Supports both standard and risk-aware modes.
@@ -41,6 +68,10 @@ pub struct MppiOptimizer {
     mean_controls: Vec<Vector4<f64>>,
     /// If Some, run risk-aware MPPI with wind sampling + CVaR
     pub risk: Option<RiskConfig>,
+    /// If Some, enforce P(collision) <= delta via online Lagrangian
+    pub chance_constraint: Option<ChanceConstraintConfig>,
+    /// Current Lagrange multiplier for the collision chance constraint
+    pub lambda_cc: f64,
 }
 
 impl MppiOptimizer {
@@ -70,12 +101,20 @@ impl MppiOptimizer {
             substeps,
             mean_controls: vec![hover_vec; horizon],
             risk: None,
+            chance_constraint: None,
+            lambda_cc: 0.0,
         }
     }
 
     /// Enable risk-aware mode with wind sampling and CVaR filtering.
     pub fn set_risk_config(&mut self, config: RiskConfig) {
         self.risk = Some(config);
+    }
+
+    /// Enable chance-constrained mode with online Lagrangian adaptation.
+    pub fn set_chance_constraint(&mut self, config: ChanceConstraintConfig) {
+        self.lambda_cc = config.lambda_init;
+        self.chance_constraint = Some(config);
     }
 
     /// Compute optimal action for the current state.
@@ -124,8 +163,8 @@ impl MppiOptimizer {
         }
     }
 
-    /// Core MPPI loop: sample, rollout, cost, (optional CVaR), softmax-weight,
-    /// warm-start shift.
+    /// Core MPPI loop: sample, rollout, cost, (optional CVaR), (optional chance constraint),
+    /// softmax-weight, warm-start shift.
     fn compute_action_with_cost_fn<F>(
         &mut self,
         self_state: &DroneState,
@@ -150,7 +189,7 @@ impl MppiOptimizer {
         let risk = self.risk.clone();
 
         // Parallel: generate perturbed sequences, rollout, compute costs
-        let perturbed_and_costs: Vec<(Vec<Vector4<f64>>, f64, f64)> = seeds
+        let mut results: Vec<(Vec<Vector4<f64>>, f64, f64)> = seeds
             .par_iter()
             .map(|&seed| {
                 let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
@@ -213,7 +252,7 @@ impl MppiOptimizer {
             .collect();
 
         // CVaR filtering: penalize worst-alpha fraction of trajectories
-        let mut costs: Vec<f64> = perturbed_and_costs.iter().map(|(_, c, _)| *c).collect();
+        let mut costs: Vec<f64> = results.iter().map(|(_, c, _)| *c).collect();
         if apply_cvar {
             if let Some(ref risk_cfg) = self.risk {
                 if risk_cfg.cvar_alpha > 0.0 && risk_cfg.cvar_alpha < 1.0 {
@@ -231,6 +270,35 @@ impl MppiOptimizer {
             }
         }
 
+        // Write CVaR-updated costs back to results so chance constraint sees them
+        for (i, (_, cost, _)) in results.iter_mut().enumerate() {
+            *cost = costs[i];
+        }
+
+        // Chance constraint: estimate collision probability from samples and apply
+        // Lagrangian penalty. Lambda is updated via dual gradient ascent.
+        if let Some(ref cc_config) = self.chance_constraint {
+            let num_colliding = results.iter().filter(|r| r.2 > 0.0).count();
+            let p_collision = num_colliding as f64 / results.len() as f64;
+
+            // Add Lagrangian penalty to colliding trajectories
+            let lambda = self.lambda_cc;
+            for result in &mut results {
+                if result.2 > 0.0 {
+                    result.1 += lambda * result.2;
+                }
+            }
+
+            // Dual variable update (gradient ascent on lambda)
+            // lambda += lr * (p_collision - delta)
+            self.lambda_cc = (self.lambda_cc
+                + cc_config.lambda_lr * (p_collision - cc_config.delta))
+                .clamp(cc_config.lambda_min, cc_config.lambda_max);
+        }
+
+        // Re-extract costs after chance constraint modification
+        let costs: Vec<f64> = results.iter().map(|(_, c, _)| *c).collect();
+
         // Softmax weights
         let min_cost = costs.iter().copied().fold(f64::INFINITY, f64::min);
         let exp_costs: Vec<f64> = costs
@@ -241,7 +309,7 @@ impl MppiOptimizer {
 
         // Weighted average of control sequences
         let mut new_mean = vec![Vector4::zeros(); self.horizon];
-        for (k, (controls, _, _)) in perturbed_and_costs.iter().enumerate() {
+        for (k, (controls, _, _)) in results.iter().enumerate() {
             let w = exp_costs[k] / total_exp;
             for t in 0..self.horizon {
                 new_mean[t] += controls[t] * w;
@@ -258,11 +326,14 @@ impl MppiOptimizer {
         action
     }
 
-    /// Reset mean controls to hover.
+    /// Reset mean controls to hover and lambda to its initial value.
     pub fn reset(&mut self) {
         let hover = self.params.hover_thrust();
         let hover_vec = Vector4::new(hover, hover, hover, hover);
         self.mean_controls = vec![hover_vec; self.horizon];
+        if let Some(ref cc) = self.chance_constraint {
+            self.lambda_cc = cc.lambda_init;
+        }
     }
 }
 
@@ -404,5 +475,110 @@ mod tests {
             assert!(action_std[i] >= 0.0);
             assert!(action_risk[i] >= 0.0);
         }
+    }
+
+    #[test]
+    fn test_chance_constraint_adapts_lambda() {
+        // Place drone very close to an obstacle so many samples collide.
+        // Lambda should increase when collision rate > delta,
+        // and decrease (or stay) when collision rate < delta.
+        let params = DroneParams::crazyflie();
+
+        // Arena with a large obstacle so the drone is inside it (guaranteed collisions)
+        let mut arena = Arena::new(Vector3::new(10.0, 10.0, 3.0));
+        arena.obstacles.push(Obstacle::Box {
+            center: Vector3::new(5.0, 5.0, 1.5),
+            half_extents: Vector3::new(4.0, 4.0, 1.5),
+        });
+
+        let weights = CostWeights::default();
+        let cc_config = ChanceConstraintConfig {
+            delta: 0.01,
+            lambda_lr: 0.5,
+            lambda_init: 100.0,
+            lambda_min: 0.0,
+            lambda_max: 1e6,
+        };
+        let lambda_init = cc_config.lambda_init;
+
+        let mut opt = MppiOptimizer::new(
+            128,
+            5,
+            0.1,
+            10.0,
+            params.clone(),
+            arena.clone(),
+            weights.clone(),
+            0.01,
+            5,
+        );
+        opt.set_risk_config(RiskConfig {
+            wind: WindModel::new(2.0, Vector3::zeros(), 0.3),
+            cvar_alpha: 0.05,
+            cvar_penalty: 10.0,
+        });
+        opt.set_chance_constraint(cc_config);
+
+        // Drone inside the obstacle — almost all samples will collide
+        let self_state = DroneState::hover_at(Vector3::new(5.0, 5.0, 1.5));
+        let target = DroneState::hover_at(Vector3::new(0.5, 0.5, 1.5));
+
+        // Run several iterations; lambda should increase because p_collision >> delta
+        for _ in 0..5 {
+            opt.compute_action(&self_state, &target, true);
+        }
+        assert!(
+            opt.lambda_cc > lambda_init,
+            "lambda should increase when collision rate > delta, got {}",
+            opt.lambda_cc
+        );
+
+        // Now test with a clear arena (no obstacles) — collision rate = 0 < delta
+        let clear_arena = Arena::new(Vector3::new(10.0, 10.0, 3.0));
+        let cc_config2 = ChanceConstraintConfig {
+            delta: 0.01,
+            lambda_lr: 0.5,
+            lambda_init: 500.0, // start high so we can observe decrease
+            lambda_min: 0.0,
+            lambda_max: 1e6,
+        };
+        let lambda_init2 = cc_config2.lambda_init;
+
+        let mut opt2 = MppiOptimizer::new(
+            128,
+            5,
+            0.03,
+            10.0,
+            params.clone(),
+            clear_arena,
+            weights,
+            0.01,
+            5,
+        );
+        opt2.set_risk_config(RiskConfig {
+            wind: WindModel::new(2.0, Vector3::zeros(), 0.3),
+            cvar_alpha: 0.05,
+            cvar_penalty: 10.0,
+        });
+        opt2.set_chance_constraint(cc_config2);
+
+        let self_state2 = DroneState::hover_at(Vector3::new(2.0, 5.0, 1.5));
+        let target2 = DroneState::hover_at(Vector3::new(8.0, 5.0, 1.5));
+
+        for _ in 0..5 {
+            opt2.compute_action(&self_state2, &target2, true);
+        }
+        assert!(
+            opt2.lambda_cc < lambda_init2,
+            "lambda should decrease when collision rate < delta, got {}",
+            opt2.lambda_cc
+        );
+
+        // Verify reset restores lambda_init
+        opt2.reset();
+        assert_eq!(
+            opt2.lambda_cc, lambda_init2,
+            "reset should restore lambda_cc to lambda_init"
+        );
     }
 }

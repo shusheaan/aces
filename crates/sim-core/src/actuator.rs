@@ -44,12 +44,14 @@ impl ActuatorModel {
     }
 
     /// Randomize per-motor bias. Call once at episode start.
+    /// Automatically enables the model if non-zero bias is applied.
     pub fn randomize_bias<R: Rng>(&mut self, bias_range: f64, rng: &mut R) {
         if bias_range > 0.0 {
             let dist = rand_distr::Uniform::new(-bias_range, bias_range);
             for i in 0..4 {
                 self.bias[i] = dist.sample(rng);
             }
+            self.enabled = true;
         } else {
             self.bias = Vector4::zeros();
         }
@@ -62,6 +64,10 @@ impl ActuatorModel {
         dt: f64,
         rng: &mut R,
     ) -> Vector4<f64> {
+        debug_assert!(
+            dt >= 0.0,
+            "ActuatorModel::apply called with negative dt: {dt}"
+        );
         if !self.enabled {
             return *commanded;
         }

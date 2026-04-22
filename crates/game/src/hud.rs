@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use crate::camera::MainCameraEntity;
 use crate::simulation::SimState;
 use crate::{ActiveDrone, GameState};
 
@@ -79,102 +80,107 @@ B             Camera
 Start         Pause
 Back          Reset";
 
-fn spawn_hud(mut commands: Commands) {
-    // Root UI container
-    commands
-        .spawn(Node {
+fn spawn_hud(mut commands: Commands, main_cam: Res<MainCameraEntity>) {
+    // Resolve the main camera entity for TargetCamera (falls back to no target if not yet set)
+    let target_camera_bundle = main_cam.0.map(TargetCamera);
+
+    // Root UI container — targeted to main camera so it only renders in top viewport
+    let mut root = commands.spawn(Node {
+        width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
+        flex_direction: FlexDirection::Column,
+        justify_content: JustifyContent::SpaceBetween,
+        ..default()
+    });
+    if let Some(tc) = target_camera_bundle {
+        root.insert(tc);
+    }
+    root.with_children(|root| {
+        // ── Top row ──
+        root.spawn(Node {
             width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
             justify_content: JustifyContent::SpaceBetween,
+            padding: UiRect::all(Val::Px(12.0)),
             ..default()
         })
-        .with_children(|root| {
-            // ── Top row ──
-            root.spawn(Node {
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::SpaceBetween,
-                padding: UiRect::all(Val::Px(12.0)),
-                ..default()
-            })
-            .with_children(|top| {
-                // Active drone label (top-left)
-                top.spawn((
-                    HudActiveDrone,
-                    Text::new("[A] Drone A"),
-                    TextFont {
-                        font_size: 22.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.0, 0.85, 1.0)),
-                ));
+        .with_children(|top| {
+            // Active drone label (top-left)
+            top.spawn((
+                HudActiveDrone,
+                Text::new("[A] Drone A"),
+                TextFont {
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.0, 0.85, 1.0)),
+            ));
 
-                // Lock-on info (top-right)
-                top.spawn((
-                    HudLockOn,
-                    Text::new("Lock: 0%"),
-                    TextFont {
-                        font_size: 20.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(1.0, 0.3, 0.3)),
-                ));
-            });
-
-            // ── Center: wall warning ──
-            root.spawn(Node {
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            })
-            .with_children(|center| {
-                center.spawn((
-                    HudWallWarning,
-                    Text::new(""),
-                    TextFont {
-                        font_size: 28.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(1.0, 0.2, 0.2)),
-                ));
-            });
-
-            // ── Bottom row ──
-            root.spawn(Node {
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::SpaceBetween,
-                padding: UiRect::all(Val::Px(12.0)),
-                ..default()
-            })
-            .with_children(|bottom| {
-                // Telemetry (bottom-left)
-                bottom.spawn((
-                    HudTelemetry,
-                    Text::new("ALT 0.0m  SPD 0.0m/s"),
-                    TextFont {
-                        font_size: 18.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.8, 0.8, 0.8)),
-                ));
-
-                // Enemy info (bottom-right)
-                bottom.spawn((
-                    HudEnemyInfo,
-                    Text::new("DIST --  HIDDEN"),
-                    TextFont {
-                        font_size: 18.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.8, 0.8, 0.8)),
-                ));
-            });
+            // Lock-on info (top-right)
+            top.spawn((
+                HudLockOn,
+                Text::new("Lock: 0%"),
+                TextFont {
+                    font_size: 20.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.3, 0.3)),
+            ));
         });
 
+        // ── Center: wall warning ──
+        root.spawn(Node {
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|center| {
+            center.spawn((
+                HudWallWarning,
+                Text::new(""),
+                TextFont {
+                    font_size: 28.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.2, 0.2)),
+            ));
+        });
+
+        // ── Bottom row ──
+        root.spawn(Node {
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::SpaceBetween,
+            padding: UiRect::all(Val::Px(12.0)),
+            ..default()
+        })
+        .with_children(|bottom| {
+            // Telemetry (bottom-left)
+            bottom.spawn((
+                HudTelemetry,
+                Text::new("ALT 0.0m  SPD 0.0m/s"),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.8, 0.8, 0.8)),
+            ));
+
+            // Enemy info (bottom-right)
+            bottom.spawn((
+                HudEnemyInfo,
+                Text::new("DIST --  HIDDEN"),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.8, 0.8, 0.8)),
+            ));
+        });
+    });
+
     // Help hint — small "[H] Help" label, hidden when overlay is open
-    commands
-        .spawn((
+    {
+        let mut hint_cmd = commands.spawn((
             HelpHint,
             Node {
                 position_type: PositionType::Absolute,
@@ -182,8 +188,11 @@ fn spawn_hud(mut commands: Commands) {
                 top: Val::Px(40.0),
                 ..default()
             },
-        ))
-        .with_children(|hint| {
+        ));
+        if let Some(entity) = main_cam.0 {
+            hint_cmd.insert(TargetCamera(entity));
+        }
+        hint_cmd.with_children(|hint| {
             hint.spawn((
                 Text::new("[H] Help"),
                 TextFont {
@@ -193,10 +202,11 @@ fn spawn_hud(mut commands: Commands) {
                 TextColor(Color::srgba(0.6, 0.6, 0.6, 0.7)),
             ));
         });
+    }
 
     // Help overlay (hidden by default)
-    commands
-        .spawn((
+    {
+        let mut overlay_cmd = commands.spawn((
             HelpOverlay,
             Node {
                 position_type: PositionType::Absolute,
@@ -207,8 +217,11 @@ fn spawn_hud(mut commands: Commands) {
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)),
             Visibility::Hidden,
-        ))
-        .with_children(|overlay| {
+        ));
+        if let Some(entity) = main_cam.0 {
+            overlay_cmd.insert(TargetCamera(entity));
+        }
+        overlay_cmd.with_children(|overlay| {
             overlay.spawn((
                 Text::new(HELP_TEXT),
                 TextFont {
@@ -218,10 +231,11 @@ fn spawn_hud(mut commands: Commands) {
                 TextColor(Color::srgb(0.9, 0.9, 0.9)),
             ));
         });
+    }
 
     // Pause overlay (hidden by default)
-    commands
-        .spawn((
+    {
+        let mut pause_cmd = commands.spawn((
             PauseOverlay,
             Node {
                 width: Val::Percent(100.0),
@@ -233,8 +247,11 @@ fn spawn_hud(mut commands: Commands) {
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
             Visibility::Hidden,
-        ))
-        .with_children(|overlay| {
+        ));
+        if let Some(entity) = main_cam.0 {
+            pause_cmd.insert(TargetCamera(entity));
+        }
+        pause_cmd.with_children(|overlay| {
             overlay.spawn((
                 Text::new("PAUSED"),
                 TextFont {
@@ -244,6 +261,7 @@ fn spawn_hud(mut commands: Commands) {
                 TextColor(Color::WHITE),
             ));
         });
+    }
 
     // ── FPV split labels (bottom portion) ──
     // Container pinned to bottom 35% of screen

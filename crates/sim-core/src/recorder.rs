@@ -106,6 +106,45 @@ impl SimRecorder {
         fs::write(path, bytes)
     }
 
+    /// Save to a binary file using bincode (convenience wrapper accepting &str).
+    pub fn save_to_file(&self, path: &str) -> io::Result<()> {
+        self.save(Path::new(path))
+    }
+
+    /// Save frames to a CSV file with columns:
+    /// tick, timestamp, ax, ay, az, bx, by, bz, dist, lock_a, lock_b
+    pub fn save_csv(&self, path: &str) -> io::Result<()> {
+        use std::fmt::Write as FmtWrite;
+        let mut out = String::new();
+        writeln!(out, "tick,timestamp,ax,ay,az,bx,by,bz,dist,lock_a,lock_b")
+            .map_err(io::Error::other)?;
+        for frame in &self.frames {
+            let dist = {
+                let dx = frame.state_a[0] - frame.state_b[0];
+                let dy = frame.state_a[1] - frame.state_b[1];
+                let dz = frame.state_a[2] - frame.state_b[2];
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            };
+            writeln!(
+                out,
+                "{},{},{},{},{},{},{},{},{},{},{}",
+                frame.tick,
+                frame.timestamp,
+                frame.state_a[0],
+                frame.state_a[1],
+                frame.state_a[2],
+                frame.state_b[0],
+                frame.state_b[1],
+                frame.state_b[2],
+                dist,
+                frame.lock_progress_a,
+                frame.lock_progress_b,
+            )
+            .map_err(io::Error::other)?;
+        }
+        fs::write(path, out)
+    }
+
     /// Load from bincode file.
     pub fn load(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;

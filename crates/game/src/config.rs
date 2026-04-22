@@ -99,6 +99,7 @@ struct MppiToml {
     temperature: f64,
     noise_std: f64,
     weights: MppiWeightsToml,
+    risk: Option<MppiRiskToml>,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +109,21 @@ struct MppiWeightsToml {
     w_ctrl: f64,
     w_obs: f64,
     d_safe: f64,
+}
+
+#[derive(Deserialize)]
+struct MppiRiskToml {
+    #[allow(dead_code)]
+    wind_theta: Option<f64>,
+    #[allow(dead_code)]
+    wind_sigma: Option<f64>,
+    #[allow(dead_code)]
+    cvar_alpha: Option<f64>,
+    #[allow(dead_code)]
+    cvar_penalty: Option<f64>,
+    cc_delta: Option<f64>,
+    cc_lambda_lr: Option<f64>,
+    cc_lambda_init: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +159,12 @@ pub struct GameConfig {
     pub wind_sigma: f64,
     pub bounds: [f64; 3],
     pub obstacle_data: Vec<([f64; 3], [f64; 3])>,
+    /// Chance constraint: max allowed collision probability (None = disabled)
+    pub cc_delta: Option<f64>,
+    /// Chance constraint: Lagrange multiplier learning rate
+    pub cc_lambda_lr: f64,
+    /// Chance constraint: initial Lagrange multiplier
+    pub cc_lambda_init: f64,
 }
 
 impl GameConfig {
@@ -220,6 +242,12 @@ impl GameConfig {
         let wind_mu_arr = noise.and_then(|n| n.wind_mu).unwrap_or([0.0, 0.0, 0.0]);
         let wind_sigma = noise.and_then(|n| n.wind_sigma).unwrap_or(0.0);
 
+        // Chance constraint params from [mppi.risk]
+        let risk = rules_toml.mppi.risk.as_ref();
+        let cc_delta = risk.and_then(|r| r.cc_delta);
+        let cc_lambda_lr = risk.and_then(|r| r.cc_lambda_lr).unwrap_or(0.1);
+        let cc_lambda_init = risk.and_then(|r| r.cc_lambda_init).unwrap_or(100.0);
+
         Self {
             arena,
             drone_params,
@@ -250,6 +278,9 @@ impl GameConfig {
                 arena_toml.bounds.z,
             ],
             obstacle_data,
+            cc_delta,
+            cc_lambda_lr,
+            cc_lambda_init,
         }
     }
 

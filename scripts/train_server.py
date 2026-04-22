@@ -49,6 +49,12 @@ def main():
         help="Single task (skips curriculum, uses SelfPlayTrainer)",
     )
     parser.add_argument("--timesteps", type=int, default=500_000)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="PyTorch device: auto, cpu, cuda, cuda:0, etc.",
+    )
 
     args = parser.parse_args()
 
@@ -65,6 +71,7 @@ def main():
             total_timesteps=args.timesteps,
             fpv=args.fpv,
             task=args.task,
+            device=args.device,
         )
         trainer.train()
         trainer.save(args.save_path)
@@ -88,6 +95,7 @@ def main():
         save_dir=args.save_dir,
         checkpoint_interval=args.checkpoint_interval,
         fpv=args.fpv,
+        device=args.device,
     )
 
     if args.resume:

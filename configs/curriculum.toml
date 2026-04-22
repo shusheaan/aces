@@ -1,4 +1,15 @@
-# Default curriculum: 5 phases of increasing difficulty
+# Default curriculum: 6 phases of increasing difficulty
+
+[[phase]]
+name = "hover_stabilize"
+task = "hover"
+opponent = "none"
+wind_sigma = 0.0
+obs_noise_std = 0.0
+use_fpv = false
+max_timesteps = 100_000
+promote_condition = "reward>-5.0"
+promote_window = 50
 
 [[phase]]
 name = "pursuit_linear"
@@ -39,6 +50,11 @@ task = "dogfight"
 opponent = "pool"
 wind_sigma = 0.3
 obs_noise_std = 0.1
+motor_time_constant = 0.02
+motor_noise_std = 0.05
+motor_bias_range = 0.03
+imu_accel_bias_std = 0.02
+imu_gyro_bias_std = 0.005
 use_fpv = false
 max_timesteps = 2_000_000
 promote_condition = "win_rate>0.55"
@@ -50,6 +66,11 @@ task = "dogfight"
 opponent = "pool"
 wind_sigma = 0.3
 obs_noise_std = 0.1
+motor_time_constant = 0.02
+motor_noise_std = 0.05
+motor_bias_range = 0.03
+imu_accel_bias_std = 0.02
+imu_gyro_bias_std = 0.005
 use_fpv = true
 max_timesteps = 5_000_000
 promote_condition = "steps"

@@ -47,7 +47,8 @@ impl ImuBias {
         dt: f64,
         rng: &mut R,
     ) -> (Vector3<f64>, Vector3<f64>) {
-        if !self.enabled {
+        debug_assert!(dt >= 0.0, "ImuBias::apply called with negative dt: {dt}");
+        if !self.enabled || dt <= 0.0 {
             return (*true_accel, *true_gyro);
         }
 

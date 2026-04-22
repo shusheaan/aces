@@ -2,6 +2,7 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::camera::Viewport;
 
+use crate::config::GameConfig;
 use crate::simulation::SimState;
 use crate::ActiveDrone;
 
@@ -11,6 +12,7 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraMode>()
             .init_resource::<OrbitState>()
+            .init_resource::<MainCameraEntity>()
             .add_systems(Startup, spawn_cameras)
             .add_systems(
                 Update,
@@ -23,6 +25,10 @@ impl Plugin for CameraPlugin {
             );
     }
 }
+
+/// Resource storing the main camera entity so HUD can target it.
+#[derive(Resource, Default)]
+pub struct MainCameraEntity(pub Option<Entity>);
 
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CameraMode {
@@ -70,7 +76,12 @@ impl Default for OrbitState {
 /// Layout: top 65% = main camera, bottom 35% = two FPV side by side.
 const MAIN_HEIGHT_RATIO: f32 = 0.65;
 
-fn spawn_cameras(mut commands: Commands, windows: Query<&Window>) {
+fn spawn_cameras(
+    mut commands: Commands,
+    windows: Query<&Window>,
+    config: Res<GameConfig>,
+    mut main_cam_entity: ResMut<MainCameraEntity>,
+) {
     let window = windows.single();
     let w = window.physical_width();
     let h = window.physical_height();
@@ -80,22 +91,29 @@ fn spawn_cameras(mut commands: Commands, windows: Query<&Window>) {
     let fpv_w = w / 2;
 
     // Main camera — top portion
-    commands.spawn((
-        MainCamera,
-        Camera3d::default(),
-        Camera {
-            viewport: Some(Viewport {
-                physical_position: UVec2::new(0, 0),
-                physical_size: UVec2::new(w, main_h),
+    let main_entity = commands
+        .spawn((
+            MainCamera,
+            Camera3d::default(),
+            Camera {
+                viewport: Some(Viewport {
+                    physical_position: UVec2::new(0, 0),
+                    physical_size: UVec2::new(w, main_h),
+                    ..default()
+                }),
+                order: 0,
                 ..default()
-            }),
-            order: 0,
-            ..default()
-        },
-        Transform::from_xyz(5.0, 12.0, 5.0).looking_at(Vec3::new(5.0, 0.0, 5.0), Vec3::Y),
-    ));
+            },
+            Transform::from_xyz(5.0, 12.0, 5.0).looking_at(Vec3::new(5.0, 0.0, 5.0), Vec3::Y),
+        ))
+        .id();
 
-    // FPV camera A — bottom-left
+    // Store main camera entity in resource for HUD targeting
+    main_cam_entity.0 = Some(main_entity);
+
+    // FPV camera A — bottom-left, initial position from spawn config
+    let spawn_a = config.spawn_a;
+    let fpv_a_pos = Vec3::new(spawn_a.x as f32, spawn_a.z as f32, spawn_a.y as f32);
     commands.spawn((
         FpvCamera { drone: FpvDrone::A },
         Camera3d::default(),
@@ -109,10 +127,12 @@ fn spawn_cameras(mut commands: Commands, windows: Query<&Window>) {
             clear_color: ClearColorConfig::Custom(Color::srgb(0.05, 0.05, 0.1)),
             ..default()
         },
-        Transform::default(),
+        Transform::from_translation(fpv_a_pos),
     ));
 
-    // FPV camera B — bottom-right
+    // FPV camera B — bottom-right, initial position from spawn config
+    let spawn_b = config.spawn_b;
+    let fpv_b_pos = Vec3::new(spawn_b.x as f32, spawn_b.z as f32, spawn_b.y as f32);
     commands.spawn((
         FpvCamera { drone: FpvDrone::B },
         Camera3d::default(),
@@ -126,7 +146,7 @@ fn spawn_cameras(mut commands: Commands, windows: Query<&Window>) {
             clear_color: ClearColorConfig::Custom(Color::srgb(0.1, 0.05, 0.05)),
             ..default()
         },
-        Transform::default(),
+        Transform::from_translation(fpv_b_pos),
     ));
 }
 
@@ -152,8 +172,8 @@ fn orbit_input(
         return;
     }
 
-    // Right-click drag: orbit
-    if mouse_buttons.pressed(MouseButton::Right) {
+    // Right-click or left-click drag: orbit
+    if mouse_buttons.pressed(MouseButton::Right) || mouse_buttons.pressed(MouseButton::Left) {
         orbit.yaw -= motion_delta.x * 0.005;
         orbit.pitch = (orbit.pitch - motion_delta.y * 0.005).clamp(0.1, 1.55);
     } else if mouse_buttons.pressed(MouseButton::Middle) {

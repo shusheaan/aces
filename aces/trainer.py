@@ -30,9 +30,9 @@ class OpponentUpdateCallback(BaseCallback):
         self.update_count = 0
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self.update_interval < self.model.n_steps:
+        if self.num_timesteps % self.update_interval < self.model.n_steps:  # type: ignore[attr-defined]
             state_dict = copy.deepcopy(self.model.policy.state_dict())
-            for env in self.training_env.envs:
+            for env in self.training_env.envs:  # type: ignore[attr-defined]
                 unwrapped = env.unwrapped
                 if hasattr(unwrapped, "_update_opponent_weights"):
                     unwrapped._update_opponent_weights(state_dict)
@@ -45,8 +45,8 @@ class OpponentUpdateCallback(BaseCallback):
 class VecOpponentUpdateCallback(BaseCallback):
     """Periodically copies current policy to opponents in a VecEnv.
 
-    Uses ``env_method("set_opponent_weights", ...)`` which works with both
-    DummyVecEnv and SubprocVecEnv.
+    Works with both plain VecEnv (broadcasts to workers) and
+    BatchedOpponentVecEnv (updates the batched policy directly).
     """
 
     def __init__(self, update_interval: int = 10000, verbose: int = 0):
@@ -54,10 +54,25 @@ class VecOpponentUpdateCallback(BaseCallback):
         self.update_interval = update_interval
         self.update_count = 0
 
+    def _on_training_start(self) -> None:
+        # If wrapped with BatchedOpponentVecEnv, initialize opponent policy
+        env = self.training_env
+        if hasattr(env, "set_opponent_policy") and not env.has_opponent:  # type: ignore[attr-defined]
+            # Clone the current policy for the opponent
+            opponent = copy.deepcopy(self.model.policy)
+            opponent.set_training_mode(False)
+            env.set_opponent_policy(opponent)
+
     def _on_step(self) -> bool:
-        if self.num_timesteps % self.update_interval < self.model.n_steps:
+        if self.num_timesteps % self.update_interval < self.model.n_steps:  # type: ignore[attr-defined]
             state_dict = copy.deepcopy(self.model.policy.state_dict())
-            self.training_env.env_method("set_opponent_weights", state_dict)
+            env = self.training_env
+            if hasattr(env, "set_opponent_weights"):
+                # BatchedOpponentVecEnv: update batched policy
+                env.set_opponent_weights(state_dict)
+            else:
+                # Plain VecEnv: broadcast to workers
+                env.env_method("set_opponent_weights", state_dict)
             self.update_count += 1
             if self.verbose:
                 print(f"[SelfPlay] Opponent updated via VecEnv (#{self.update_count})")
@@ -67,7 +82,7 @@ class VecOpponentUpdateCallback(BaseCallback):
 class PoolOpponentCallback(BaseCallback):
     """Periodically samples an opponent from the OpponentPool.
 
-    Uses ``env_method("set_opponent_policy", ...)`` on the VecEnv.
+    Works with both plain VecEnv and BatchedOpponentVecEnv.
     """
 
     def __init__(self, pool, sample_interval: int = 20000, verbose: int = 0):
@@ -75,14 +90,29 @@ class PoolOpponentCallback(BaseCallback):
         self._pool = pool
         self._sample_interval = sample_interval
 
+    def _on_training_start(self) -> None:
+        # Initialize batched opponent if wrapper is present
+        env = self.training_env
+        if (
+            hasattr(env, "set_opponent_policy")
+            and not env.has_opponent  # type: ignore[attr-defined]
+            and self._pool.size > 0
+        ):
+            policy, _ = self._pool.sample()
+            env.set_opponent_policy(policy)
+
     def _on_step(self) -> bool:
         if (
             self._pool.size > 0
-            and self.num_timesteps % self._sample_interval < self.model.n_steps
+            and self.num_timesteps % self._sample_interval < self.model.n_steps  # type: ignore[attr-defined]
         ):
             policy, meta = self._pool.sample()
             state_dict = copy.deepcopy(policy.state_dict())
-            self.training_env.env_method("set_opponent_weights", state_dict)
+            env = self.training_env
+            if hasattr(env, "set_opponent_weights"):
+                env.set_opponent_weights(state_dict)
+            else:
+                env.env_method("set_opponent_weights", state_dict)
             if self.verbose:
                 print(f"[Pool] Sampled opponent: {meta}")
         return True
@@ -177,7 +207,7 @@ class TensorBoardMetricsCallback(BaseCallback):
                 self._ep_current_reward = 0.0
 
         # Log every 1000 steps
-        if self.num_timesteps % 1000 < self.model.n_steps and self._total_episodes > 0:
+        if self.num_timesteps % 1000 < self.model.n_steps and self._total_episodes > 0:  # type: ignore[attr-defined]
             n = max(len(self._ep_rewards), 1)
             win_rate = self._kills / max(self._total_episodes, 1)
             self.logger.record("aces/win_rate", win_rate)
@@ -208,8 +238,8 @@ class EpisodeLoggerCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._csv_file = open(self.log_dir / "episodes.csv", "w")
-        self._csv_file.write(
+        self._csv_file = open(self.log_dir / "episodes.csv", "w")  # type: ignore[assignment]
+        self._csv_file.write(  # type: ignore[attr-defined]
             "episode,timestep,reward,length,kill,death,crash,lock_progress,distance\n"
         )
 
@@ -230,12 +260,12 @@ class EpisodeLoggerCallback(BaseCallback):
             lock_p = info.get("lock_a_progress", 0.0)
             dist = info.get("distance", 0.0)
 
-            self._csv_file.write(
+            self._csv_file.write(  # type: ignore[attr-defined]
                 f"{self._ep_count},{self.num_timesteps},"
                 f"{self._ep_reward:.4f},{self._ep_length},"
                 f"{kill},{death},{crash},{lock_p:.4f},{dist:.4f}\n"
             )
-            self._csv_file.flush()
+            self._csv_file.flush()  # type: ignore[attr-defined]
 
             if self.verbose and self._ep_count % 50 == 0:
                 print(
@@ -270,7 +300,7 @@ class CheckpointResumeCallback(BaseCallback):
         self._interval = interval
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self._interval < self.model.n_steps:
+        if self.num_timesteps % self._interval < self.model.n_steps:  # type: ignore[attr-defined]
             ckpt_path = f"{self._checkpoint_dir}/step_{self.num_timesteps}"
             self._save_fn(ckpt_path)
             if self.verbose:
@@ -304,6 +334,7 @@ class SelfPlayTrainer:
         obs_noise_std: float | None = None,
         fpv: bool = False,
         task: str = "dogfight",
+        device: str = "auto",
         **kwargs,
     ):
         # Load config defaults from rules.toml
@@ -363,6 +394,7 @@ class SelfPlayTrainer:
             n_epochs=_n_epochs,
             verbose=0,
             policy_kwargs=policy_kwargs,
+            device=device,
         )
 
         self._setup_opponent()
@@ -461,6 +493,7 @@ class CurriculumTrainer:
         obs_noise_std: float | None = None,
         pool_dir: str | None = None,
         pool_max_size: int = 20,
+        device: str = "auto",
     ):
         self._config_dir = config_dir
         self._fpv = fpv
@@ -476,6 +509,7 @@ class CurriculumTrainer:
             clip_range=clip_range,
             n_epochs=n_epochs,
             verbose=0,
+            device=device,
         )
         self._wind_sigma = wind_sigma
         self._obs_noise_std = obs_noise_std
@@ -527,16 +561,33 @@ class CurriculumTrainer:
             )
         return phases
 
-    def _make_env(self, task: str) -> DroneDogfightEnv:
+    def _make_env(
+        self, task: str, opponent: str = "random", phase=None
+    ) -> DroneDogfightEnv:
         """Create a single environment (backward-compat helper)."""
-        return DroneDogfightEnv(
-            config_dir=self._config_dir,
-            max_episode_steps=1000,
-            task=task,
-            wind_sigma=self._wind_sigma,
-            obs_noise_std=self._obs_noise_std,
-            fpv=self._fpv,
-        )
+        kwargs: dict = {
+            "config_dir": self._config_dir,
+            "max_episode_steps": 1000,
+            "task": task,
+            "opponent": opponent,
+            "wind_sigma": self._wind_sigma,
+            "obs_noise_std": self._obs_noise_std,
+            "fpv": self._fpv,
+        }
+        if phase is not None:
+            kwargs["wind_sigma"] = phase.wind_sigma
+            kwargs["obs_noise_std"] = phase.obs_noise_std
+            for key in (
+                "motor_time_constant",
+                "motor_noise_std",
+                "motor_bias_range",
+                "imu_accel_bias_std",
+                "imu_gyro_bias_std",
+            ):
+                val = getattr(phase, key, None)
+                if val is not None:
+                    kwargs[key] = val
+        return DroneDogfightEnv(**kwargs)
 
     def _make_vec_env(self, phase_or_task):
         """Create a VecEnv for the given phase or task string.
@@ -547,21 +598,26 @@ class CurriculumTrainer:
 
         # Extract parameters from phase or use defaults
         if hasattr(phase_or_task, "task"):
-            task = phase_or_task.task
-            wind = (
-                phase_or_task.wind_sigma
-                if phase_or_task.wind_sigma
-                else self._wind_sigma
-            )
-            noise = (
-                phase_or_task.obs_noise_std
-                if phase_or_task.obs_noise_std
-                else self._obs_noise_std
-            )
+            phase = phase_or_task
+            task = phase.task
+            opponent = getattr(phase, "opponent", "random")
+            wind = phase.wind_sigma
+            noise = phase.obs_noise_std
+            motor_tc = getattr(phase, "motor_time_constant", None)
+            motor_ns = getattr(phase, "motor_noise_std", None)
+            motor_br = getattr(phase, "motor_bias_range", None)
+            imu_acc = getattr(phase, "imu_accel_bias_std", None)
+            imu_gyr = getattr(phase, "imu_gyro_bias_std", None)
         else:
             task = phase_or_task
+            opponent = "random"
             wind = self._wind_sigma
             noise = self._obs_noise_std
+            motor_tc = None
+            motor_ns = None
+            motor_br = None
+            imu_acc = None
+            imu_gyr = None
 
         def make_env(rank):
             def _init():
@@ -569,16 +625,31 @@ class CurriculumTrainer:
                     config_dir=self._config_dir,
                     max_episode_steps=1000,
                     task=task,
+                    opponent=opponent,
                     wind_sigma=wind,
                     obs_noise_std=noise,
                     fpv=self._fpv,
+                    motor_time_constant=motor_tc,
+                    motor_noise_std=motor_ns,
+                    motor_bias_range=motor_br,
+                    imu_accel_bias_std=imu_acc,
+                    imu_gyro_bias_std=imu_gyr,
                 )
 
             return _init
 
         if self._n_envs > 1:
-            return SubprocVecEnv([make_env(i) for i in range(self._n_envs)])
-        return DummyVecEnv([make_env(0)])
+            vec_env = SubprocVecEnv([make_env(i) for i in range(self._n_envs)])
+        else:
+            vec_env = DummyVecEnv([make_env(0)])
+
+        # Wrap with batched opponent inference for policy/pool opponents
+        if opponent in ("policy", "pool"):
+            from aces.batched_vec_env import BatchedOpponentVecEnv
+
+            vec_env = BatchedOpponentVecEnv(vec_env)
+
+        return vec_env
 
     def _resolve_policy(self) -> tuple[str, dict | None]:
         if self._fpv:
@@ -622,7 +693,9 @@ class CurriculumTrainer:
             if self._n_envs > 1:
                 env = self._make_vec_env(phase)
             else:
-                env = self._make_env(task)
+                env = self._make_env(
+                    task, opponent=getattr(phase, "opponent", "random"), phase=phase
+                )
 
             if self.model is None:
                 policy_name, policy_kwargs = self._resolve_policy()
@@ -633,7 +706,7 @@ class CurriculumTrainer:
                     policy_name,
                     env,
                     tensorboard_log=tb_log_dir,
-                    **kwargs,
+                    **kwargs,  # type: ignore[arg-type]
                 )
             else:
                 self.model.set_env(env)
@@ -702,7 +775,7 @@ class CurriculumTrainer:
             if not self.curriculum.is_last_phase():
                 self.curriculum.promote()
 
-        return self.model
+        return self.model  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
     # Checkpoint / resume
