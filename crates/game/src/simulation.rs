@@ -277,10 +277,31 @@ fn sim_step(mut sim: ResMut<SimState>, cmd: Res<DroneCommand>, active: Res<Activ
         a_sees_b: s.a_sees_b,
         b_sees_a: s.b_sees_a,
     });
+
+    // Log drone state every 100 ticks (1 second at 100Hz)
+    if s.tick.is_multiple_of(100) {
+        bevy::log::info!(
+            "tick={} A=[{:.2},{:.2},{:.2}] B=[{:.2},{:.2},{:.2}] dist={:.2} lock_a={:.0}% lock_b={:.0}%",
+            s.tick,
+            s.state_a.position.x, s.state_a.position.y, s.state_a.position.z,
+            s.state_b.position.x, s.state_b.position.y, s.state_b.position.z,
+            s.distance,
+            s.lock_a.progress() * 100.0,
+            s.lock_b.progress() * 100.0,
+        );
+    }
 }
 
 /// Reset sim to initial state.
 pub fn reset_sim(sim: &mut SimState, config: &GameConfig) {
+    // Save recording before clearing if there are frames
+    if !sim.recorder.is_empty() {
+        let filename = format!("sim_recording_{}.csv", sim.tick);
+        if let Err(e) = sim.recorder.save_csv(&filename) {
+            bevy::log::warn!("Failed to save recording: {e}");
+        }
+    }
+
     sim.state_a = DroneState::hover_at(config.spawn_a);
     sim.state_b = DroneState::hover_at(config.spawn_b);
     sim.lock_a.reset();
