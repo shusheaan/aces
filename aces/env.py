@@ -52,6 +52,11 @@ class DroneDogfightEnv(gym.Env):
         obs_noise_std: float | None = None,
         fpv: bool = False,
         task: str = "dogfight",
+        motor_time_constant: float | None = None,
+        motor_noise_std: float | None = None,
+        motor_bias_range: float | None = None,
+        imu_accel_bias_std: float | None = None,
+        imu_gyro_bias_std: float | None = None,
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -132,12 +137,26 @@ class DroneDogfightEnv(gym.Env):
             noise.obs_noise_std if obs_noise_std is None else obs_noise_std
         )
 
-        # Actuator noise parameters
-        self._motor_time_constant = noise.motor_time_constant
-        self._motor_noise_std = noise.motor_noise_std
-        self._motor_bias_range = noise.motor_bias_range
-        self._imu_accel_bias_std = noise.imu_accel_bias_std
-        self._imu_gyro_bias_std = noise.imu_gyro_bias_std
+        # Actuator noise parameters — constructor args override config
+        self._motor_time_constant = (
+            noise.motor_time_constant
+            if motor_time_constant is None
+            else motor_time_constant
+        )
+        self._motor_noise_std = (
+            noise.motor_noise_std if motor_noise_std is None else motor_noise_std
+        )
+        self._motor_bias_range = (
+            noise.motor_bias_range if motor_bias_range is None else motor_bias_range
+        )
+        self._imu_accel_bias_std = (
+            noise.imu_accel_bias_std
+            if imu_accel_bias_std is None
+            else imu_accel_bias_std
+        )
+        self._imu_gyro_bias_std = (
+            noise.imu_gyro_bias_std if imu_gyro_bias_std is None else imu_gyro_bias_std
+        )
 
         # Domain randomization config
         self._dr = cfg.rules.domain_randomization

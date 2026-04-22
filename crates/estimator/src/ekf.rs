@@ -90,6 +90,10 @@ impl EKF {
 
     /// Prediction step: advance state by dt assuming constant velocity.
     pub fn predict(&mut self, dt: f64) {
+        debug_assert!(dt >= 0.0, "EKF predict called with negative dt: {dt}");
+        if dt <= 0.0 {
+            return;
+        }
         // State transition: p += v * dt
         let mut f = Matrix6::identity();
         for i in 0..3 {

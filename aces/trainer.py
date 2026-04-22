@@ -531,17 +531,33 @@ class CurriculumTrainer:
             )
         return phases
 
-    def _make_env(self, task: str, opponent: str = "random") -> DroneDogfightEnv:
+    def _make_env(
+        self, task: str, opponent: str = "random", phase=None
+    ) -> DroneDogfightEnv:
         """Create a single environment (backward-compat helper)."""
-        return DroneDogfightEnv(
-            config_dir=self._config_dir,
-            max_episode_steps=1000,
-            task=task,
-            opponent=opponent,
-            wind_sigma=self._wind_sigma,
-            obs_noise_std=self._obs_noise_std,
-            fpv=self._fpv,
-        )
+        kwargs: dict = {
+            "config_dir": self._config_dir,
+            "max_episode_steps": 1000,
+            "task": task,
+            "opponent": opponent,
+            "wind_sigma": self._wind_sigma,
+            "obs_noise_std": self._obs_noise_std,
+            "fpv": self._fpv,
+        }
+        if phase is not None:
+            kwargs["wind_sigma"] = phase.wind_sigma
+            kwargs["obs_noise_std"] = phase.obs_noise_std
+            for key in (
+                "motor_time_constant",
+                "motor_noise_std",
+                "motor_bias_range",
+                "imu_accel_bias_std",
+                "imu_gyro_bias_std",
+            ):
+                val = getattr(phase, key, None)
+                if val is not None:
+                    kwargs[key] = val
+        return DroneDogfightEnv(**kwargs)
 
     def _make_vec_env(self, phase_or_task):
         """Create a VecEnv for the given phase or task string.
@@ -552,23 +568,26 @@ class CurriculumTrainer:
 
         # Extract parameters from phase or use defaults
         if hasattr(phase_or_task, "task"):
-            task = phase_or_task.task
-            opponent = getattr(phase_or_task, "opponent", "random")
-            wind = (
-                phase_or_task.wind_sigma
-                if phase_or_task.wind_sigma
-                else self._wind_sigma
-            )
-            noise = (
-                phase_or_task.obs_noise_std
-                if phase_or_task.obs_noise_std
-                else self._obs_noise_std
-            )
+            phase = phase_or_task
+            task = phase.task
+            opponent = getattr(phase, "opponent", "random")
+            wind = phase.wind_sigma
+            noise = phase.obs_noise_std
+            motor_tc = getattr(phase, "motor_time_constant", None)
+            motor_ns = getattr(phase, "motor_noise_std", None)
+            motor_br = getattr(phase, "motor_bias_range", None)
+            imu_acc = getattr(phase, "imu_accel_bias_std", None)
+            imu_gyr = getattr(phase, "imu_gyro_bias_std", None)
         else:
             task = phase_or_task
             opponent = "random"
             wind = self._wind_sigma
             noise = self._obs_noise_std
+            motor_tc = None
+            motor_ns = None
+            motor_br = None
+            imu_acc = None
+            imu_gyr = None
 
         def make_env(rank):
             def _init():
@@ -580,6 +599,11 @@ class CurriculumTrainer:
                     wind_sigma=wind,
                     obs_noise_std=noise,
                     fpv=self._fpv,
+                    motor_time_constant=motor_tc,
+                    motor_noise_std=motor_ns,
+                    motor_bias_range=motor_br,
+                    imu_accel_bias_std=imu_acc,
+                    imu_gyro_bias_std=imu_gyr,
                 )
 
             return _init
@@ -631,7 +655,7 @@ class CurriculumTrainer:
                 env = self._make_vec_env(phase)
             else:
                 env = self._make_env(
-                    task, opponent=getattr(phase, "opponent", "random")
+                    task, opponent=getattr(phase, "opponent", "random"), phase=phase
                 )
 
             if self.model is None:

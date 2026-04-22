@@ -131,8 +131,8 @@ class TestEkfNoiseLevels:
             noisy_pos = np.array(r.noisy_b_pos_from_a)
             ekf_pos = np.array(r.ekf_b_pos_from_a)
 
-            # Skip if not visible (noisy_pos will be zeros)
-            if np.linalg.norm(noisy_pos) < 0.01:
+            # Skip if not visible
+            if not r.a_sees_b:
                 continue
 
             sum_raw += np.linalg.norm(noisy_pos - true_pos)
