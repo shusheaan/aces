@@ -132,6 +132,22 @@ class DroneDogfightEnv(gym.Env):
             noise.obs_noise_std if obs_noise_std is None else obs_noise_std
         )
 
+        # Actuator noise parameters
+        self._motor_time_constant = noise.motor_time_constant
+        self._motor_noise_std = noise.motor_noise_std
+        self._motor_bias_range = noise.motor_bias_range
+        self._imu_accel_bias_std = noise.imu_accel_bias_std
+        self._imu_gyro_bias_std = noise.imu_gyro_bias_std
+
+        # Domain randomization config
+        self._dr = cfg.rules.domain_randomization
+
+        # Store nominal values for domain randomization
+        self._nominal_mass = self._mass
+        self._nominal_max_thrust = self._max_thrust
+        self._nominal_drag_coeff = self._drag_coeff
+        self._nominal_inertia = list(self._inertia)
+
         # Build Rust simulation
         self._sim = self._build_sim()
 
@@ -261,6 +277,11 @@ class DroneDogfightEnv(gym.Env):
             camera_max_depth=self._camera_max_depth,
             camera_render_hz=self._camera_render_hz,
             camera_min_conf_dist=self._camera_min_conf_dist,
+            motor_time_constant=self._motor_time_constant,
+            motor_noise_std=self._motor_noise_std,
+            motor_bias_range=self._motor_bias_range,
+            imu_accel_bias_std=self._imu_accel_bias_std,
+            imu_gyro_bias_std=self._imu_gyro_bias_std,
         )
 
     # ------------------------------------------------------------------
@@ -514,6 +535,28 @@ class DroneDogfightEnv(gym.Env):
         super().reset(seed=seed)
         self._step_count = 0
 
+        # Domain randomization: rebuild sim with randomized physical params
+        if self._dr.enabled:
+
+            def _rand_scale(nominal: float, frac: float) -> float:
+                if frac <= 0.0:
+                    return nominal
+                return nominal * (1.0 + self.np_random.uniform(-frac, frac))
+
+            self._mass = _rand_scale(self._nominal_mass, self._dr.mass_range)
+            self._max_thrust = _rand_scale(
+                self._nominal_max_thrust, self._dr.max_thrust_range
+            )
+            self._drag_coeff = _rand_scale(
+                self._nominal_drag_coeff, self._dr.drag_range
+            )
+            inertia_scale = 1.0 + self.np_random.uniform(
+                -self._dr.inertia_range, self._dr.inertia_range
+            )
+            self._inertia = [i * inertia_scale for i in self._nominal_inertia]
+            self._sim = self._build_sim()
+            self._hover_thrust = self._sim.hover_thrust()
+
         # Set up trajectory for pursuit_linear
         if self._task == "pursuit_linear":
             traj_type, traj_kwargs = Trajectory.random_trajectory(
@@ -762,6 +805,11 @@ class DroneDogfightEnv(gym.Env):
                 "depth": result.det_a_depth,
                 "pixel_center": list(result.det_a_pixel_center),
             },
+            # EKF diagnostics
+            "ekf_cov_diag": np.array(result.ekf_a_cov_diag, dtype=np.float32),
+            "ekf_innovation": np.array(result.ekf_a_innovation, dtype=np.float32),
+            "imu_accel_bias": np.array(result.imu_accel_bias_a, dtype=np.float32),
+            "imu_gyro_bias": np.array(result.imu_gyro_bias_a, dtype=np.float32),
             # Constraint-relevant fields for Lagrangian PPO
             "collision": bool(result.drone_a_collision or result.drone_a_oob),
             "nearest_obs_dist": float(result.nearest_obs_dist_a),
