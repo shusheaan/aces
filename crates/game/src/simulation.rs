@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use aces_mppi::optimizer::MppiOptimizer;
+use aces_mppi::optimizer::{ChanceConstraintConfig, MppiOptimizer};
 use aces_sim_core::collision::{check_line_of_sight, Visibility};
 use aces_sim_core::dynamics::{step_rk4, DroneParams};
 use aces_sim_core::environment::Arena;
@@ -83,7 +83,7 @@ fn init_sim(mut commands: Commands, config: Res<GameConfig>) {
         WindModel::disabled()
     };
 
-    let mppi = MppiOptimizer::new(
+    let mut mppi = MppiOptimizer::new(
         config.mppi_num_samples,
         config.mppi_horizon,
         config.mppi_noise_std,
@@ -94,6 +94,17 @@ fn init_sim(mut commands: Commands, config: Res<GameConfig>) {
         config.dt_ctrl,
         config.substeps,
     );
+
+    // Enable chance constraint if configured
+    if let Some(delta) = config.cc_delta {
+        mppi.set_chance_constraint(ChanceConstraintConfig {
+            delta,
+            lambda_lr: config.cc_lambda_lr,
+            lambda_init: config.cc_lambda_init,
+            lambda_min: 0.0,
+            lambda_max: 1e6,
+        });
+    }
 
     let hover = config.drone_params.hover_thrust();
     let hover_motors = Vector4::new(hover, hover, hover, hover);

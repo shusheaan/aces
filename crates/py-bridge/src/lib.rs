@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use aces_estimator::ekf::EKF;
 use aces_estimator::particle_filter::ParticleFilter;
 use aces_mppi::cost::CostWeights;
-use aces_mppi::optimizer::{MppiOptimizer, RiskConfig};
+use aces_mppi::optimizer::{ChanceConstraintConfig, MppiOptimizer, RiskConfig};
 use aces_sim_core::camera::{render_depth, CameraFrame, CameraParams};
 use aces_sim_core::collision::{check_line_of_sight, Visibility};
 use aces_sim_core::detection::{detect_opponent, Detection};
@@ -716,6 +716,9 @@ impl MppiController {
         risk_wind_sigma = 0.0,
         risk_cvar_alpha = 0.0,
         risk_cvar_penalty = 0.0,
+        cc_delta = None,
+        cc_lambda_lr = 0.1,
+        cc_lambda_init = 100.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -743,6 +746,9 @@ impl MppiController {
         risk_wind_sigma: f64,
         risk_cvar_alpha: f64,
         risk_cvar_penalty: f64,
+        cc_delta: Option<f64>,
+        cc_lambda_lr: f64,
+        cc_lambda_init: f64,
     ) -> Self {
         let arena = build_arena(bounds, obstacles, drone_radius);
         let params = build_params(
@@ -778,6 +784,17 @@ impl MppiController {
                 wind: WindModel::new(risk_wind_theta, Vector3::zeros(), risk_wind_sigma),
                 cvar_alpha: risk_cvar_alpha,
                 cvar_penalty: risk_cvar_penalty,
+            });
+        }
+
+        // Enable chance constraint if cc_delta is provided
+        if let Some(delta) = cc_delta {
+            optimizer.set_chance_constraint(ChanceConstraintConfig {
+                delta,
+                lambda_lr: cc_lambda_lr,
+                lambda_init: cc_lambda_init,
+                lambda_min: 0.0,
+                lambda_max: 1e6,
             });
         }
 

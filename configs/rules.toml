@@ -36,6 +36,9 @@ wind_theta = 2.0              # OU reversion rate for planning wind
 wind_sigma = 0.0              # Wind volatility for planning (0 = disabled / standard MPPI)
 cvar_alpha = 0.05             # Fraction of worst-case trajectories to penalize
 cvar_penalty = 10.0           # Extra cost multiplier for worst-alpha trajectories
+cc_delta = 0.01               # Chance constraint: max allowed collision probability (1%)
+cc_lambda_lr = 0.1            # Lagrange multiplier learning rate for chance constraint
+cc_lambda_init = 100.0        # Initial Lagrange multiplier for chance constraint
 
 [noise]
 # Ornstein-Uhlenbeck wind disturbance
