@@ -9,3 +9,4 @@ dist/
 .pytest_cache/
 *.pyc
 .ruff_cache/
+logs/

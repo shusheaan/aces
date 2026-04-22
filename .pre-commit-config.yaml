@@ -1,0 +1,44 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: .venv/bin/ruff format --check
+        types: [python]
+
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: .venv/bin/ruff check
+        types: [python]
+
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: cargo fmt --check
+        pass_filenames: false
+        types: [rust]
+
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        entry: cargo clippy --workspace -- -D warnings
+        pass_filenames: false
+        types: [rust]
+
+      - id: cargo-test
+        name: cargo test
+        language: system
+        entry: cargo test --workspace
+        pass_filenames: false
+        types: [rust]
+        stages: [pre-push]
+
+      - id: pytest
+        name: pytest
+        language: system
+        entry: .venv/bin/python -m pytest tests/ -q
+        pass_filenames: false
+        types: [python]
+        stages: [pre-push]
