@@ -9,10 +9,12 @@ from aces.curriculum import CurriculumManager, Phase, load_curriculum
 
 
 def test_load_curriculum() -> None:
-    """Load 5 phases from curriculum.toml; check first and last."""
+    """Load 6 phases from curriculum.toml; check first and last."""
     phases = load_curriculum()
-    assert len(phases) == 5
-    assert phases[0].name == "pursuit_linear"
+    assert len(phases) == 6
+    assert phases[0].name == "hover_stabilize"
+    assert phases[0].task == "hover"
+    assert phases[1].name == "pursuit_linear"
     assert phases[-1].use_fpv is True
 
 
@@ -26,7 +28,7 @@ def test_curriculum_manager_initial_phase() -> None:
     phases = load_curriculum()
     mgr = CurriculumManager(phases)
     assert mgr.phase_index == 0
-    assert mgr.current_phase().name == "pursuit_linear"
+    assert mgr.current_phase().name == "hover_stabilize"
 
 
 # ---------------------------------------------------------------------------

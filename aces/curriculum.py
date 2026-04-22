@@ -29,6 +29,12 @@ class Phase:
     max_timesteps: int = 500_000
     promote_condition: str = "steps"
     promote_window: int = 100
+    # Sim2real fidelity parameters (optional, used in later phases)
+    motor_time_constant: float = 0.0
+    motor_noise_std: float = 0.0
+    motor_bias_range: float = 0.0
+    imu_accel_bias_std: float = 0.0
+    imu_gyro_bias_std: float = 0.0
 
 
 def _project_root() -> Path:
@@ -122,8 +128,8 @@ class CurriculumManager:
         if episodes < phase.promote_window:
             return False
 
-        value = stats.get(metric, 0.0)
-        return value > threshold
+        value: float = stats.get(metric, 0.0)
+        return bool(value > threshold)
 
     def promote(self) -> Phase | None:
         """Advance to the next curriculum phase.
