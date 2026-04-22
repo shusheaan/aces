@@ -1,8 +1,10 @@
+pub mod actuator;
 pub mod camera;
 pub mod collision;
 pub mod detection;
 pub mod dynamics;
 pub mod environment;
+pub mod imu_bias;
 pub mod lockon;
 pub mod noise;
 pub mod recorder;
