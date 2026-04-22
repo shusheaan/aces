@@ -317,6 +317,26 @@ class DroneDogfightEnv(gym.Env):
         if self._opponent_policy is not None:
             self._opponent_policy.load_state_dict(state_dict)
 
+    def get_opponent_obs(self) -> np.ndarray:
+        """Return the observation vector the opponent would see.
+
+        Used by BatchedOpponentVecEnv to collect obs from all envs,
+        batch-predict opponent actions on GPU, then set them back.
+        """
+        state_b = list(self._sim.drone_b_state())
+        state_a = list(self._sim.drone_a_state())
+        return self._build_obs(state_b, state_a, 0.0, 0.0, 0.0)
+
+    def set_next_opponent_action(self, raw_action: list[float]) -> None:
+        """Pre-set opponent's raw [-1,1] action for the next step.
+
+        The action is mapped to motor thrusts internally. If set, the next
+        call to step() uses this instead of computing opponent action locally.
+        """
+        self._external_opponent_action = self._map_action(
+            np.array(raw_action, dtype=np.float32)
+        )
+
     # ------------------------------------------------------------------
     # Observation building
     # ------------------------------------------------------------------
@@ -435,6 +455,11 @@ class DroneDogfightEnv(gym.Env):
 
     def _opponent_action(self) -> list[float]:
         """Compute opponent motor thrusts based on current task/mode."""
+        # Use externally-set action if available (from BatchedOpponentVecEnv)
+        ext: list[float] | None = getattr(self, "_external_opponent_action", None)
+        if ext is not None:
+            self._external_opponent_action = None  # type: ignore[assignment]
+            return ext
         # No opponent in hover task or when opponent="none"
         if self._task == "hover" or self._opponent_mode == "none":
             return [self._hover_thrust] * 4

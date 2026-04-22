@@ -45,8 +45,8 @@ class OpponentUpdateCallback(BaseCallback):
 class VecOpponentUpdateCallback(BaseCallback):
     """Periodically copies current policy to opponents in a VecEnv.
 
-    Uses ``env_method("set_opponent_weights", ...)`` which works with both
-    DummyVecEnv and SubprocVecEnv.
+    Works with both plain VecEnv (broadcasts to workers) and
+    BatchedOpponentVecEnv (updates the batched policy directly).
     """
 
     def __init__(self, update_interval: int = 10000, verbose: int = 0):
@@ -54,10 +54,25 @@ class VecOpponentUpdateCallback(BaseCallback):
         self.update_interval = update_interval
         self.update_count = 0
 
+    def _on_training_start(self) -> None:
+        # If wrapped with BatchedOpponentVecEnv, initialize opponent policy
+        env = self.training_env
+        if hasattr(env, "set_opponent_policy") and not env.has_opponent:  # type: ignore[attr-defined]
+            # Clone the current policy for the opponent
+            opponent = copy.deepcopy(self.model.policy)
+            opponent.set_training_mode(False)
+            env.set_opponent_policy(opponent)
+
     def _on_step(self) -> bool:
         if self.num_timesteps % self.update_interval < self.model.n_steps:  # type: ignore[attr-defined]
             state_dict = copy.deepcopy(self.model.policy.state_dict())
-            self.training_env.env_method("set_opponent_weights", state_dict)
+            env = self.training_env
+            if hasattr(env, "set_opponent_weights"):
+                # BatchedOpponentVecEnv: update batched policy
+                env.set_opponent_weights(state_dict)
+            else:
+                # Plain VecEnv: broadcast to workers
+                env.env_method("set_opponent_weights", state_dict)
             self.update_count += 1
             if self.verbose:
                 print(f"[SelfPlay] Opponent updated via VecEnv (#{self.update_count})")
@@ -67,13 +82,24 @@ class VecOpponentUpdateCallback(BaseCallback):
 class PoolOpponentCallback(BaseCallback):
     """Periodically samples an opponent from the OpponentPool.
 
-    Uses ``env_method("set_opponent_policy", ...)`` on the VecEnv.
+    Works with both plain VecEnv and BatchedOpponentVecEnv.
     """
 
     def __init__(self, pool, sample_interval: int = 20000, verbose: int = 0):
         super().__init__(verbose)
         self._pool = pool
         self._sample_interval = sample_interval
+
+    def _on_training_start(self) -> None:
+        # Initialize batched opponent if wrapper is present
+        env = self.training_env
+        if (
+            hasattr(env, "set_opponent_policy")
+            and not env.has_opponent  # type: ignore[attr-defined]
+            and self._pool.size > 0
+        ):
+            policy, _ = self._pool.sample()
+            env.set_opponent_policy(policy)
 
     def _on_step(self) -> bool:
         if (
@@ -82,7 +108,11 @@ class PoolOpponentCallback(BaseCallback):
         ):
             policy, meta = self._pool.sample()
             state_dict = copy.deepcopy(policy.state_dict())
-            self.training_env.env_method("set_opponent_weights", state_dict)
+            env = self.training_env
+            if hasattr(env, "set_opponent_weights"):
+                env.set_opponent_weights(state_dict)
+            else:
+                env.env_method("set_opponent_weights", state_dict)
             if self.verbose:
                 print(f"[Pool] Sampled opponent: {meta}")
         return True
@@ -609,8 +639,17 @@ class CurriculumTrainer:
             return _init
 
         if self._n_envs > 1:
-            return SubprocVecEnv([make_env(i) for i in range(self._n_envs)])
-        return DummyVecEnv([make_env(0)])
+            vec_env = SubprocVecEnv([make_env(i) for i in range(self._n_envs)])
+        else:
+            vec_env = DummyVecEnv([make_env(0)])
+
+        # Wrap with batched opponent inference for policy/pool opponents
+        if opponent in ("policy", "pool"):
+            from aces.batched_vec_env import BatchedOpponentVecEnv
+
+            vec_env = BatchedOpponentVecEnv(vec_env)
+
+        return vec_env
 
     def _resolve_policy(self) -> tuple[str, dict | None]:
         if self._fpv:
