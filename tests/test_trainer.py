@@ -1,6 +1,6 @@
 """Tests for self-play PPO training."""
 
-from aces.trainer import CurriculumTrainer, SelfPlayTrainer, evaluate
+from aces.training import CurriculumTrainer, SelfPlayTrainer, evaluate
 
 
 def test_trainer_creation():

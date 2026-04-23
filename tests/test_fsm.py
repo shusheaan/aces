@@ -1,6 +1,6 @@
 """Tests for aces.fsm — Symbolic Finite State Machine."""
 
-from aces.fsm import DroneMode, SymbolicFSM
+from aces.perception import DroneMode, SymbolicFSM
 
 
 def _features(**overrides: float) -> dict[str, float]:

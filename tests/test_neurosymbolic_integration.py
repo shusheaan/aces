@@ -3,9 +3,7 @@
 import numpy as np
 import torch
 
-from aces.fsm import DroneMode, SymbolicFSM
-from aces.god_oracle import GodOracle
-from aces.perception import PerceptionNet
+from aces.perception import DroneMode, GodOracle, PerceptionNet, SymbolicFSM
 
 
 def test_full_pipeline_oracle_to_fsm() -> None:

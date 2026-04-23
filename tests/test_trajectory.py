@@ -7,7 +7,7 @@ import math
 import numpy as np
 import pytest
 
-from aces.trajectory import Trajectory
+from aces.env import Trajectory
 
 
 # ---------------------------------------------------------------------------

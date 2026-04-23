@@ -60,7 +60,7 @@ def main():
 
     # Single-task mode (backward compat)
     if args.task:
-        from aces.trainer import SelfPlayTrainer
+        from aces.training import SelfPlayTrainer
 
         print(
             f"[ACES] Single-task training: {args.task} for {args.timesteps} steps "
@@ -80,7 +80,7 @@ def main():
 
     # Curriculum mode
     from aces.curriculum import load_curriculum
-    from aces.trainer import CurriculumTrainer
+    from aces.training import CurriculumTrainer
 
     curriculum_path = args.curriculum or str(Path(args.config_dir) / "curriculum.toml")
     phases = load_curriculum(curriculum_path)

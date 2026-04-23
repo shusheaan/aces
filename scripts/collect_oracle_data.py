@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from aces.env import DroneDogfightEnv
-from aces.god_oracle import GodOracle, extract_oracle_inputs
+from aces.perception import GodOracle, extract_oracle_inputs
 
 
 def collect(n_episodes: int, output_path: str) -> None:
