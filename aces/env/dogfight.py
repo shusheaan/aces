@@ -10,7 +10,7 @@ import numpy as np
 
 from aces._core import MppiController, Simulation
 from aces.config import load_configs
-from aces.trajectory import Trajectory
+from aces.env.trajectory import Trajectory
 
 
 # ---------------------------------------------------------------------------

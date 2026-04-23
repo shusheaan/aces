@@ -25,6 +25,8 @@ class CnnImuExtractor(BaseFeaturesExtractor):
         image_space = observation_space["image"]
         vector_space = observation_space["vector"]
 
+        assert image_space.shape is not None
+        assert vector_space.shape is not None
         n_channels = image_space.shape[0]  # 1
         vector_dim = vector_space.shape[0]  # 12
 
@@ -41,7 +43,7 @@ class CnnImuExtractor(BaseFeaturesExtractor):
 
         # Compute CNN output size
         with th.no_grad():
-            sample = th.zeros(1, *image_space.shape)
+            sample = th.zeros(1, *image_space.shape)  # type: ignore[misc]
             cnn_out_dim = self.cnn(sample).shape[1]
 
         self.cnn_linear = nn.Sequential(
