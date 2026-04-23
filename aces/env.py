@@ -760,20 +760,21 @@ class DroneDogfightEnv(gym.Env):
         # Terminal conditions (agent collision / OOB)
         if result.drone_a_collision or result.drone_a_oob:
             if self._task == "hover":
-                reward = -10.0
+                reward = float(rcfg["collision_penalty"])
             else:
                 reward = float(rcfg["collision_penalty"])
             terminated = True
         elif self._task == "hover":
-            # Hover task reward: penalise angular velocity, position drift, control
-            # and give small survival bonus
+            # Hover task reward: survival-dominant with small shaping penalties.
+            # The survival bonus must exceed worst-case shaping so the agent
+            # prefers hovering imperfectly over crashing early.
             pos_drift = float(np.linalg.norm(own_state_arr[:3] - self._hover_spawn_pos))
             motors_arr = np.array(motors_a, dtype=np.float64)
             hover_arr = np.full(4, self._hover_thrust, dtype=np.float64)
             ctrl_cost = float(np.sum((motors_arr - hover_arr) ** 2))
-            reward = (
-                -ang_vel_norm - pos_drift - 0.01 * ctrl_cost + 0.01  # survival bonus
-            )
+            # Clamp shaping penalties so survival bonus always dominates
+            shaping = min(0.1 * ang_vel_norm + 0.1 * pos_drift + 0.001 * ctrl_cost, 0.8)
+            reward = 1.0 - shaping  # net reward is always positive when hovering
         # Opponent kills agent
         elif result.kill_b:
             reward = float(rcfg["killed_penalty"])
