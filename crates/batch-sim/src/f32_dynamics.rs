@@ -218,12 +218,38 @@ pub fn step_rk4_f32(
     let avg_q_dot = (k1_q + k2_q * 2.0 + k3_q * 2.0 + k4_q) * (1.0 / 6.0);
     let new_attitude = integrate_quaternion_f32(&state.attitude, &avg_q_dot, dt);
 
-    DroneStateF32 {
+    let result = DroneStateF32 {
         position: new_pos,
         velocity: new_vel,
         attitude: new_attitude,
         angular_velocity: new_w,
-    }
+    };
+
+    // Invariant checks (debug builds only — zero cost in release).
+    // Quaternion norm tolerance is 1e-3 (vs 1e-4 in the f64 reference) because
+    // f32 drift is higher.
+    debug_assert!(
+        result.position.iter().all(|v| v.is_finite()),
+        "NaN/Inf in position after RK4: {:?}",
+        result.position
+    );
+    debug_assert!(
+        result.velocity.iter().all(|v| v.is_finite()),
+        "NaN/Inf in velocity after RK4: {:?}",
+        result.velocity
+    );
+    debug_assert!(
+        result.angular_velocity.iter().all(|v| v.is_finite()),
+        "NaN/Inf in angular_velocity after RK4: {:?}",
+        result.angular_velocity
+    );
+    debug_assert!(
+        (result.attitude.quaternion().norm() - 1.0).abs() < 1e-3,
+        "Quaternion norm drift after RK4: {}",
+        result.attitude.quaternion().norm()
+    );
+
+    result
 }
 
 /// Integrate quaternion: q_new = normalize(q + q_dot * dt).
@@ -252,9 +278,8 @@ mod tests {
 
     /// Angle between two unit quaternions (radians, in [0, pi]).
     fn quat_angle_between(a: &UnitQuaternion<f64>, b: &UnitQuaternion<f64>) -> f64 {
-        // nalgebra's UnitQuaternion::angle_to handles double-cover; use it when
-        // available. For robustness we compute manually too: the rotation
-        // between a and b is a * b^-1, whose angle is 2*acos(|dot|).
+        // Compute manually and handle the double-cover by taking |dot|: the
+        // rotation between a and b is a * b^-1, whose angle is 2*acos(|dot|).
         let dot = a.quaternion().dot(b.quaternion()).abs().min(1.0);
         2.0 * dot.acos()
     }
@@ -358,6 +383,12 @@ mod tests {
         // Same aggressive setup as Test B — run pure f32 for 500 steps and
         // confirm explicit renormalization in UnitQuaternion::from_quaternion
         // contains f32 drift to <1e-3.
+        //
+        // NOTE: On its own this test cannot detect a missing renormalization,
+        // because UnitQuaternion::from_quaternion enforces unit norm by
+        // construction. Full coverage of "renormalization actually happens"
+        // relies on the three f64-vs-f32 parity tests above — if renormalization
+        // were skipped, attitude drift would exceed ATT_TOL_RAD there.
         let params = DroneParamsF32::crazyflie();
         let mut state = DroneStateF32::hover_at(Vector3::new(0.0, 0.0, 1.5));
         let motors = Vector4::new(
