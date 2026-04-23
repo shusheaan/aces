@@ -17,13 +17,13 @@ from stable_baselines3 import PPO
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from aces.env import DroneDogfightEnv
-from aces.logging_config import (
+from aces.training.logging import (
     create_run_dir,
     save_config_snapshot,
     save_run_metadata,
     setup_logging,
 )
-from aces.trainer import (
+from aces.training import (
     EpisodeLoggerCallback,
     OpponentUpdateCallback,
     TrainingStatsCallback,

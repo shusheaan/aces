@@ -1,7 +1,7 @@
 """Tests for the Elo-rated opponent pool."""
 
 from aces.env import DroneDogfightEnv
-from aces.opponent_pool import OpponentPool
+from aces.training import OpponentPool
 from stable_baselines3 import PPO
 
 

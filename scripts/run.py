@@ -132,7 +132,7 @@ def _resolve_noise(args) -> tuple[float | None, float | None]:
 
 def run_train(args):
     """Train RL agent with self-play."""
-    from aces.trainer import SelfPlayTrainer
+    from aces.training import SelfPlayTrainer
 
     wind_sigma, obs_noise_std = _resolve_noise(args)
     timesteps = int(str(args.timesteps).split(",")[0])
@@ -179,7 +179,7 @@ def run_train(args):
 
 def run_evaluate(args):
     """Evaluate a trained model against an opponent."""
-    from aces.trainer import evaluate
+    from aces.training import evaluate
 
     wind_sigma, obs_noise_std = _resolve_noise(args)
 
@@ -304,11 +304,11 @@ def main():
     elif args.mode == "evaluate":
         run_evaluate(args)
     elif args.mode == "export":
-        from aces.export import export_mlp_policy
+        from aces.policy import export_mlp_policy
 
         export_mlp_policy(args.model_path, args.save_path.rstrip("/") + ".bin")
     elif args.mode == "curriculum":
-        from aces.trainer import CurriculumTrainer
+        from aces.training import CurriculumTrainer
 
         wind_sigma, obs_noise_std = _resolve_noise(args)
         ts_parts = [int(x) for x in str(args.timesteps).split(",")]

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from aces.god_oracle import GodOracle, extract_oracle_inputs
+from aces.perception import GodOracle, extract_oracle_inputs
 
 
 def test_threat_max_when_being_locked_and_close() -> None:
