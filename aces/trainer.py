@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -14,6 +15,14 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from aces.config import load_configs
 from aces.env import DroneDogfightEnv
+from aces.logging_config import (
+    create_run_dir,
+    save_config_snapshot,
+    save_run_metadata,
+    setup_logging,
+)
+
+logger = logging.getLogger("aces.trainer")
 
 
 # ---------------------------------------------------------------------------
@@ -28,9 +37,12 @@ class OpponentUpdateCallback(BaseCallback):
         super().__init__(verbose)
         self.update_interval = update_interval
         self.update_count = 0
+        self._last_update_window: int = 0
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self.update_interval < self.model.n_steps:  # type: ignore[attr-defined]
+        window = self.num_timesteps // self.update_interval
+        if window > self._last_update_window:
+            self._last_update_window = window
             state_dict = copy.deepcopy(self.model.policy.state_dict())
             for env in self.training_env.envs:  # type: ignore[attr-defined]
                 unwrapped = env.unwrapped
@@ -38,7 +50,11 @@ class OpponentUpdateCallback(BaseCallback):
                     unwrapped._update_opponent_weights(state_dict)
             self.update_count += 1
             if self.verbose:
-                print(f"[SelfPlay] Opponent updated (#{self.update_count})")
+                logger.info(
+                    "Opponent updated (#%d) at step %d",
+                    self.update_count,
+                    self.num_timesteps,
+                )
         return True
 
 
@@ -53,6 +69,7 @@ class VecOpponentUpdateCallback(BaseCallback):
         super().__init__(verbose)
         self.update_interval = update_interval
         self.update_count = 0
+        self._last_update_window: int = 0
 
     def _on_training_start(self) -> None:
         # If wrapped with BatchedOpponentVecEnv, initialize opponent policy
@@ -64,18 +81,22 @@ class VecOpponentUpdateCallback(BaseCallback):
             env.set_opponent_policy(opponent)
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self.update_interval < self.model.n_steps:  # type: ignore[attr-defined]
+        window = self.num_timesteps // self.update_interval
+        if window > self._last_update_window:
+            self._last_update_window = window
             state_dict = copy.deepcopy(self.model.policy.state_dict())
             env = self.training_env
             if hasattr(env, "set_opponent_weights"):
-                # BatchedOpponentVecEnv: update batched policy
                 env.set_opponent_weights(state_dict)
             else:
-                # Plain VecEnv: broadcast to workers
                 env.env_method("set_opponent_weights", state_dict)
             self.update_count += 1
             if self.verbose:
-                print(f"[SelfPlay] Opponent updated via VecEnv (#{self.update_count})")
+                logger.info(
+                    "VecEnv opponent updated (#%d) at step %d",
+                    self.update_count,
+                    self.num_timesteps,
+                )
         return True
 
 
@@ -89,6 +110,7 @@ class PoolOpponentCallback(BaseCallback):
         super().__init__(verbose)
         self._pool = pool
         self._sample_interval = sample_interval
+        self._last_sample_window: int = 0
 
     def _on_training_start(self) -> None:
         # Initialize batched opponent if wrapper is present
@@ -102,10 +124,9 @@ class PoolOpponentCallback(BaseCallback):
             env.set_opponent_policy(policy)
 
     def _on_step(self) -> bool:
-        if (
-            self._pool.size > 0
-            and self.num_timesteps % self._sample_interval < self.model.n_steps  # type: ignore[attr-defined]
-        ):
+        window = self.num_timesteps // self._sample_interval
+        if self._pool.size > 0 and window > self._last_sample_window:
+            self._last_sample_window = window
             policy, meta = self._pool.sample()
             state_dict = copy.deepcopy(policy.state_dict())
             env = self.training_env
@@ -114,7 +135,7 @@ class PoolOpponentCallback(BaseCallback):
             else:
                 env.env_method("set_opponent_weights", state_dict)
             if self.verbose:
-                print(f"[Pool] Sampled opponent: {meta}")
+                logger.info("Pool sampled opponent: %s", meta)
         return True
 
 
@@ -190,6 +211,7 @@ class TensorBoardMetricsCallback(BaseCallback):
         self._ep_current_reward = 0.0
         self._kills = 0
         self._total_episodes = 0
+        self._last_log_window: int = -1
 
     def _on_step(self) -> bool:
         rewards = self.locals.get("rewards", [0.0])
@@ -206,8 +228,10 @@ class TensorBoardMetricsCallback(BaseCallback):
                 self._ep_rewards.append(self._ep_current_reward)
                 self._ep_current_reward = 0.0
 
-        # Log every 1000 steps
-        if self.num_timesteps % 1000 < self.model.n_steps and self._total_episodes > 0:  # type: ignore[attr-defined]
+        # Log every 1000 steps (window-based dedup)
+        window = self.num_timesteps // 1000
+        if window > self._last_log_window and self._total_episodes > 0:
+            self._last_log_window = window
             n = max(len(self._ep_rewards), 1)
             win_rate = self._kills / max(self._total_episodes, 1)
             self.logger.record("aces/win_rate", win_rate)
@@ -225,7 +249,7 @@ class EpisodeLoggerCallback(BaseCallback):
     """Writes per-episode stats to CSV for offline analysis.
 
     Output: ``<log_dir>/episodes.csv`` with columns:
-        episode, timestep, reward, length, kill, death, crash, lock_progress, distance
+        episode, timestep, reward, length, kill, death, crash, timeout, lock_progress, distance
     """
 
     def __init__(self, log_dir: str, verbose: int = 0):
@@ -240,7 +264,7 @@ class EpisodeLoggerCallback(BaseCallback):
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._csv_file = open(self.log_dir / "episodes.csv", "w")  # type: ignore[assignment]
         self._csv_file.write(  # type: ignore[attr-defined]
-            "episode,timestep,reward,length,kill,death,crash,lock_progress,distance\n"
+            "episode,timestep,reward,length,kill,death,crash,timeout,lock_progress,distance\n"
         )
 
     def _on_step(self) -> bool:
@@ -256,22 +280,29 @@ class EpisodeLoggerCallback(BaseCallback):
             info = infos[0] if infos else {}
             kill = 1 if info.get("kill_a", False) else 0
             death = 1 if info.get("kill_b", False) else 0
-            crash = 1 if (not kill and not death) else 0
+            crash = 1 if info.get("collision", False) else 0
+            timeout = 1 if info.get("truncated", False) else 0
             lock_p = info.get("lock_a_progress", 0.0)
             dist = info.get("distance", 0.0)
 
             self._csv_file.write(  # type: ignore[attr-defined]
                 f"{self._ep_count},{self.num_timesteps},"
                 f"{self._ep_reward:.4f},{self._ep_length},"
-                f"{kill},{death},{crash},{lock_p:.4f},{dist:.4f}\n"
+                f"{kill},{death},{crash},{timeout},{lock_p:.4f},{dist:.4f}\n"
             )
             self._csv_file.flush()  # type: ignore[attr-defined]
 
             if self.verbose and self._ep_count % 50 == 0:
-                print(
-                    f"[Log] Ep {self._ep_count}: "
-                    f"reward={self._ep_reward:.2f} len={self._ep_length} "
-                    f"kill={kill} death={death}"
+                logger.info(
+                    "Ep %d: reward=%.2f len=%d kill=%d death=%d crash=%d timeout=%d dist=%.2f",
+                    self._ep_count,
+                    self._ep_reward,
+                    self._ep_length,
+                    kill,
+                    death,
+                    crash,
+                    timeout,
+                    dist,
                 )
 
             self._ep_reward = 0.0
@@ -298,13 +329,16 @@ class CheckpointResumeCallback(BaseCallback):
         self._save_fn = save_fn
         self._checkpoint_dir = checkpoint_dir
         self._interval = interval
+        self._last_ckpt_window: int = 0
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self._interval < self.model.n_steps:  # type: ignore[attr-defined]
+        window = self.num_timesteps // self._interval
+        if window > self._last_ckpt_window:
+            self._last_ckpt_window = window
             ckpt_path = f"{self._checkpoint_dir}/step_{self.num_timesteps}"
             self._save_fn(ckpt_path)
             if self.verbose:
-                print(f"[Checkpoint] Saved at step {self.num_timesteps}")
+                logger.info("Checkpoint saved at step %d", self.num_timesteps)
         return True
 
 
@@ -370,6 +404,10 @@ class SelfPlayTrainer:
         self.opponent_update_count = 0
         self.stats: dict = {}
         self._fpv = fpv
+        self._config_dir = config_dir
+        self._task = task
+        self._wind_sigma = wind_sigma
+        self._obs_noise_std = obs_noise_std
 
         self.env = DroneDogfightEnv(
             config_dir=config_dir,
@@ -426,7 +464,17 @@ class SelfPlayTrainer:
         self.env.set_opponent_policy(opponent_model.policy)
 
     def train(self) -> PPO:
-        log_dir = Path("logs") / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        log_dir = create_run_dir(prefix="train")
+        setup_logging(log_dir=log_dir)
+        save_config_snapshot(log_dir, self._config_dir)
+        save_run_metadata(
+            log_dir,
+            task=self._task,
+            timesteps=self.total_timesteps,
+            fpv=self._fpv,
+            wind_sigma=self._wind_sigma,
+            obs_noise_std=self._obs_noise_std,
+        )
 
         opp_cb = OpponentUpdateCallback(
             update_interval=self.opponent_update_interval, verbose=1
@@ -435,7 +483,13 @@ class SelfPlayTrainer:
         stats_cb = TrainingStatsCallback()
         logger_cb = EpisodeLoggerCallback(log_dir=str(log_dir), verbose=1)
 
-        print(f"[ACES] Episode logs -> {log_dir}/episodes.csv")
+        logger.info(
+            "Training started: %d timesteps, task=%s, fpv=%s",
+            self.total_timesteps,
+            self._task,
+            self._fpv,
+        )
+        logger.info("Episode logs -> %s/episodes.csv", log_dir)
 
         self.model.learn(
             total_timesteps=self.total_timesteps,
@@ -443,6 +497,8 @@ class SelfPlayTrainer:
         )
         self.opponent_update_count = opp_cb.update_count
         self.stats = stats_cb.summary()
+
+        logger.info("Training complete: %s", self.stats)
         return self.model
 
     def save(self, path: str = "aces_model"):
@@ -687,7 +743,7 @@ class CurriculumTrainer:
             task = phase.task
             timesteps = phase.max_timesteps
 
-            print(f"\n[ACES] === Phase {i} -- {phase.name} ({timesteps} steps) ===")
+            logger.info("=== Phase %d -- %s (%d steps) ===", i, phase.name, timesteps)
 
             # Create env: use VecEnv when n_envs is set, single env otherwise
             if self._n_envs > 1:
@@ -765,7 +821,7 @@ class CurriculumTrainer:
             ):
                 self.pool.add(self.model, {"phase": phase.name})
 
-            print(f"[ACES] Phase {i} done: {stats_cb.summary()}")
+            logger.info("Phase %d done: %s", i, stats_cb.summary())
 
             # Close VecEnv if we created one
             if self._n_envs > 1:
