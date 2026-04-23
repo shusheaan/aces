@@ -12,13 +12,22 @@ pub struct ObservationNoise {
     pub std_dev: f64,
     /// Whether noise is enabled
     pub enabled: bool,
+    /// Cached normal distribution (avoids recreating on every call)
+    normal: Option<Normal<f64>>,
 }
 
 impl ObservationNoise {
     pub fn new(std_dev: f64) -> Self {
+        let enabled = std_dev > 0.0;
+        let normal = if enabled {
+            Some(Normal::new(0.0, std_dev).unwrap())
+        } else {
+            None
+        };
         Self {
             std_dev,
-            enabled: std_dev > 0.0,
+            enabled,
+            normal,
         }
     }
 
@@ -28,7 +37,7 @@ impl ObservationNoise {
             return *true_position;
         }
 
-        let normal = Normal::new(0.0, self.std_dev).unwrap();
+        let normal = self.normal.as_ref().unwrap();
         Vector3::new(
             true_position.x + normal.sample(rng),
             true_position.y + normal.sample(rng),
@@ -46,7 +55,7 @@ impl ObservationNoise {
             return *true_velocity;
         }
 
-        let normal = Normal::new(0.0, self.std_dev).unwrap();
+        let normal = self.normal.as_ref().unwrap();
         Vector3::new(
             true_velocity.x + normal.sample(rng),
             true_velocity.y + normal.sample(rng),

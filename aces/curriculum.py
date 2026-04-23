@@ -39,7 +39,9 @@ class Phase:
 
 def _project_root() -> Path:
     """Return the project root (directory containing 'configs/')."""
-    return Path(__file__).resolve().parent.parent
+    from aces.config import _project_root as _root
+
+    return _root()
 
 
 def load_curriculum(path: str | Path | None = None) -> list[Phase]:

@@ -75,7 +75,7 @@ impl ParticleFilter {
     where
         F: Fn(&Vector3<f64>) -> f64,
     {
-        let normal = Normal::new(0.0, self.process_noise_accel * dt).unwrap();
+        let normal = Normal::new(0.0, self.process_noise_accel * dt.sqrt()).unwrap();
 
         for p in &mut self.particles {
             // Save previous state for rejection
@@ -108,7 +108,7 @@ impl ParticleFilter {
 
     /// Prediction step: propagate particles (no obstacle checking).
     pub fn predict(&mut self, dt: f64, rng: &mut impl Rng) {
-        let normal = Normal::new(0.0, self.process_noise_accel * dt).unwrap();
+        let normal = Normal::new(0.0, self.process_noise_accel * dt.sqrt()).unwrap();
 
         for p in &mut self.particles {
             p.velocity += Vector3::new(

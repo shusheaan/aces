@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -22,6 +23,54 @@ from aces.training.callbacks import (
 )
 
 logger = logging.getLogger("aces.trainer")
+
+
+class PromotionCheckCallback(BaseCallback):
+    """Checks curriculum promotion conditions during training."""
+
+    def __init__(self, curriculum, check_interval: int = 5000, verbose: int = 0):
+        super().__init__(verbose)
+        self._curriculum = curriculum
+        self._check_interval = check_interval
+        self._last_check_window: int = 0
+        self._ep_rewards: list[float] = []
+        self._recent_wins: list[bool] = []
+        self._ep_current_rewards: np.ndarray = np.array([0.0])
+        self.promoted = False
+
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._ep_current_rewards = np.zeros(n, dtype=np.float64)
+        self._last_check_window = self.num_timesteps // self._check_interval
+
+    def _on_step(self) -> bool:
+        rewards = self.locals.get("rewards", np.zeros(len(self._ep_current_rewards)))
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
+
+        for i, info in enumerate(infos):
+            self._ep_current_rewards[i] += float(rewards[i])
+
+        for i, done in enumerate(dones):
+            if done:
+                self._ep_rewards.append(float(self._ep_current_rewards[i]))
+                self._ep_current_rewards[i] = 0.0
+                info = infos[i] if i < len(infos) else {}
+                self._recent_wins.append(info.get("kill_a", False))
+
+        window = self.num_timesteps // self._check_interval
+        if window > self._last_check_window and len(self._ep_rewards) > 0:
+            self._last_check_window = window
+            recent = self._recent_wins[-100:]
+            metrics = {
+                "reward": float(np.mean(self._ep_rewards[-100:])),
+                "win_rate": sum(recent) / max(len(recent), 1),
+            }
+            if self._curriculum.should_promote(metrics):
+                logger.info("Promotion condition met: %s", metrics)
+                self.promoted = True
+                self.model.stop_training = True  # type: ignore[attr-defined]
+        return True
 
 
 class CurriculumTrainer:
@@ -60,8 +109,10 @@ class CurriculumTrainer:
         pool_dir: str | None = None,
         pool_max_size: int = 20,
         device: str = "auto",
+        seed: int | None = None,
     ):
         self._config_dir = config_dir
+        self._seed = seed
         self._fpv = fpv
         self._save_dir = Path(save_dir) if save_dir else None
         self._n_envs = n_envs
@@ -212,14 +263,9 @@ class CurriculumTrainer:
         return vec_env
 
     def _resolve_policy(self) -> tuple[str, dict | None]:
-        if self._fpv:
-            from aces.policy.extractors import CnnImuExtractor
+        from aces.training import resolve_policy
 
-            return "MultiInputPolicy", {
-                "features_extractor_class": CnnImuExtractor,
-                "features_extractor_kwargs": {"features_dim": 192},
-            }
-        return "MlpPolicy", None
+        return resolve_policy(self._fpv)
 
     def train(self) -> PPO:
         """Run curriculum training through all phases."""
@@ -234,6 +280,7 @@ class CurriculumTrainer:
             tb_log_dir = None
 
         start_idx = self.curriculum.phase_index
+        vec_normalize_path = log_dir / "vec_normalize.pkl"
 
         for i in range(start_idx, len(self._phases)):
             self.curriculum.phase_index = i
@@ -252,11 +299,24 @@ class CurriculumTrainer:
                     task, opponent=getattr(phase, "opponent", "random"), phase=phase
                 )
                 env = VecNormalize(
-                    DummyVecEnv([lambda: raw_env]),
+                    DummyVecEnv([lambda e=raw_env: e]),  # type: ignore[misc]
                     norm_obs=True,
                     norm_reward=True,
                     clip_obs=10.0,
                 )
+
+            # Restore VecNormalize stats from previous phase
+            if i > start_idx and vec_normalize_path.exists():
+                from stable_baselines3.common.vec_env import VecNormalize
+
+                if isinstance(env, VecNormalize):
+                    import pickle
+
+                    with open(vec_normalize_path, "rb") as f:
+                        saved = pickle.load(f)
+                    env.obs_rms = saved["obs_rms"]
+                    env.ret_rms = saved["ret_rms"]
+                    logger.info("Restored VecNormalize stats from previous phase")
 
             if self.model is None:
                 policy_name, policy_kwargs = self._resolve_policy()
@@ -267,6 +327,7 @@ class CurriculumTrainer:
                     policy_name,
                     env,
                     tensorboard_log=tb_log_dir,
+                    seed=self._seed,
                     **kwargs,  # type: ignore[arg-type]
                 )
             else:
@@ -277,7 +338,14 @@ class CurriculumTrainer:
             logger_cb = EpisodeLoggerCallback(log_dir=str(stage_log), verbose=1)
             tb_cb = TensorBoardMetricsCallback()
             window_cb = WindowSummaryCallback(interval=10_000)
-            callbacks: list[BaseCallback] = [stats_cb, logger_cb, tb_cb, window_cb]
+            promo_cb = PromotionCheckCallback(self.curriculum, check_interval=5000)
+            callbacks: list[BaseCallback] = [
+                stats_cb,
+                logger_cb,
+                tb_cb,
+                window_cb,
+                promo_cb,
+            ]
 
             if hasattr(phase, "opponent") and phase.opponent == "policy":
                 opp_cb = VecOpponentUpdateCallback(update_interval=10000, verbose=1)
@@ -308,7 +376,25 @@ class CurriculumTrainer:
                 reset_num_timesteps=False,
             )
 
+            if promo_cb.promoted:
+                logger.info("Phase %d promoted early by condition", i)
+            elif phase.promote_condition != "steps":
+                logger.warning(
+                    "Phase %d did not meet promotion condition '%s' within %d steps",
+                    i,
+                    phase.promote_condition,
+                    timesteps,
+                )
+
             self.stage_stats.append(stats_cb.summary())
+
+            # Save VecNormalize stats for next phase
+            if isinstance(env, VecNormalize):
+                import pickle
+
+                vec_normalize_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(vec_normalize_path, "wb") as f:
+                    pickle.dump({"obs_rms": env.obs_rms, "ret_rms": env.ret_rms}, f)
 
             if self._save_dir:
                 self._save_dir.mkdir(parents=True, exist_ok=True)
@@ -323,8 +409,7 @@ class CurriculumTrainer:
 
             logger.info("Phase %d done: %s", i, stats_cb.summary())
 
-            if self._n_envs > 1:
-                env.close()
+            env.close()
 
             if not self.curriculum.is_last_phase():
                 self.curriculum.promote()

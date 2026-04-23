@@ -67,5 +67,5 @@ def test_fov_radians_property(cfg: AcesConfig) -> None:
 
 def test_drone_inertia_property(cfg: AcesConfig) -> None:
     d = cfg.drone
-    assert d.inertia == [d.ixx, d.iyy, d.izz]
+    assert d.inertia == (d.ixx, d.iyy, d.izz)
     assert len(d.inertia) == 3

@@ -14,7 +14,7 @@ from aces.training.callbacks import (
     VecOpponentUpdateCallback,
     WindowSummaryCallback,
 )
-from aces.training.evaluate import _pick, evaluate
+from aces.training.evaluate import evaluate
 from aces.training.logging import (
     create_run_dir,
     save_config_snapshot,
@@ -42,7 +42,6 @@ __all__ = [
     "VecOpponentUpdateCallback",
     "WindowSummaryCallback",
     # evaluate
-    "_pick",
     "evaluate",
     # logging
     "create_run_dir",
@@ -52,4 +51,18 @@ __all__ = [
     # opponent_pool
     "OpponentPool",
     "PoolEntry",
+    # utils
+    "resolve_policy",
 ]
+
+
+def resolve_policy(fpv: bool) -> tuple[str, dict | None]:
+    """Return (policy_name, policy_kwargs) based on observation mode."""
+    if fpv:
+        from aces.policy.extractors import CnnImuExtractor
+
+        return "MultiInputPolicy", {
+            "features_extractor_class": CnnImuExtractor,
+            "features_extractor_kwargs": {"features_dim": 192},
+        }
+    return "MlpPolicy", None

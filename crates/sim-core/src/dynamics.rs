@@ -73,6 +73,7 @@ impl Default for DroneParams {
 ///
 /// # Returns
 /// Tuple of (velocity, acceleration, quaternion_derivative, angular_acceleration)
+#[inline]
 pub fn state_derivative(
     state: &DroneState,
     motors: &Vector4<f64>,
@@ -207,6 +208,7 @@ pub fn step_rk4(
 }
 
 /// Integrate quaternion: q_new = normalize(q + q_dot * dt)
+#[inline]
 fn integrate_quaternion(
     q: &UnitQuaternion<f64>,
     q_dot: &Quaternion<f64>,

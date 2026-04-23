@@ -9,7 +9,7 @@ use rand_distr::{Distribution, Normal};
 ///
 /// where θ controls reversion speed, μ is the mean wind,
 /// σ is the volatility, and dW is a Wiener process increment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct WindModel {
     /// Current wind force vector (N)
     pub force: Vector3<f64>,
@@ -21,6 +21,8 @@ pub struct WindModel {
     pub sigma: f64,
     /// Whether wind is enabled
     pub enabled: bool,
+    /// Cached standard normal distribution for Wiener process increments
+    normal: Normal<f64>,
 }
 
 impl WindModel {
@@ -31,6 +33,7 @@ impl WindModel {
             mu,
             sigma,
             enabled: true,
+            normal: Normal::new(0.0, 1.0).unwrap(),
         }
     }
 
@@ -47,6 +50,7 @@ impl WindModel {
             mu: Vector3::zeros(),
             sigma: 0.0,
             enabled: false,
+            normal: Normal::new(0.0, 1.0).unwrap(),
         }
     }
 
@@ -56,13 +60,12 @@ impl WindModel {
             return Vector3::zeros();
         }
 
-        let normal = Normal::new(0.0, 1.0).unwrap();
         let sqrt_dt = dt.sqrt();
 
         // Euler-Maruyama discretization of OU process
         for i in 0..3 {
             let drift = self.theta * (self.mu[i] - self.force[i]) * dt;
-            let diffusion = self.sigma * sqrt_dt * normal.sample(rng);
+            let diffusion = self.sigma * sqrt_dt * self.normal.sample(rng);
             self.force[i] += drift + diffusion;
         }
 

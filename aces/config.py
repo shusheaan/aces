@@ -33,8 +33,8 @@ class DroneConfig:
     substeps: int
 
     @property
-    def inertia(self) -> list[float]:
-        return [self.ixx, self.iyy, self.izz]
+    def inertia(self) -> tuple[float, float, float]:
+        return (self.ixx, self.iyy, self.izz)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +171,7 @@ class RulesConfig:
     reward: RewardConfig
     training: TrainingConfig
     domain_randomization: DomainRandomizationConfig
+    task_reward_overrides: dict
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +336,10 @@ def _parse_rules(data: dict) -> RulesConfig:
         max_episode_steps=tr_raw["max_episode_steps"],
     )
 
+    task_reward_overrides: dict = {}
+    for task, overrides in data.get("task_reward_overrides", {}).items():
+        task_reward_overrides[task] = dict(overrides)
+
     return RulesConfig(
         lockon=lockon,
         mppi=mppi,
@@ -344,6 +349,7 @@ def _parse_rules(data: dict) -> RulesConfig:
         reward=reward,
         training=training,
         domain_randomization=domain_randomization,
+        task_reward_overrides=task_reward_overrides,
     )
 
 

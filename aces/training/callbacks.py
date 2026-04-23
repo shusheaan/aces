@@ -35,10 +35,14 @@ class OpponentUpdateCallback(BaseCallback):
         if window > self._last_update_window:
             self._last_update_window = window
             state_dict = copy.deepcopy(self.model.policy.state_dict())
-            for env in self.training_env.envs:  # type: ignore[attr-defined]
-                unwrapped = env.unwrapped
-                if hasattr(unwrapped, "_update_opponent_weights"):
-                    unwrapped._update_opponent_weights(state_dict)
+            env = self.training_env
+            if hasattr(env, "envs"):
+                for e in env.envs:  # type: ignore[attr-defined]
+                    unwrapped = e.unwrapped
+                    if hasattr(unwrapped, "_update_opponent_weights"):
+                        unwrapped._update_opponent_weights(state_dict)
+            else:
+                env.env_method("_update_opponent_weights", state_dict)
             self.update_count += 1
             if self.verbose:
                 logger.info(
@@ -157,27 +161,34 @@ class TrainingStatsCallback(BaseCallback):
         self.kills: int = 0
         self.deaths: int = 0
         self.collisions: int = 0
-        self._current_reward = 0.0
-        self._current_length = 0
+        self._current_rewards: np.ndarray = np.array([0.0])
+        self._current_lengths: np.ndarray = np.array([0])
+
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._current_rewards = np.zeros(n, dtype=np.float64)
+        self._current_lengths = np.zeros(n, dtype=np.int64)
 
     def _on_step(self) -> bool:
-        for info in self.locals.get("infos", []):
-            self._current_reward += self.locals.get("rewards", [0.0])[0]
-            self._current_length += 1
+        rewards = self.locals.get("rewards", np.zeros(len(self._current_rewards)))
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
+
+        for i, info in enumerate(infos):
+            self._current_rewards[i] += float(rewards[i])
+            self._current_lengths[i] += 1
 
             if info.get("kill_a", False):
                 self.kills += 1
             if info.get("kill_b", False):
                 self.deaths += 1
 
-        # Check for episode end
-        dones = self.locals.get("dones", [])
-        for done in dones:
+        for i, done in enumerate(dones):
             if done:
-                self.episode_rewards.append(self._current_reward)
-                self.episode_lengths.append(self._current_length)
-                self._current_reward = 0.0
-                self._current_length = 0
+                self.episode_rewards.append(float(self._current_rewards[i]))
+                self.episode_lengths.append(int(self._current_lengths[i]))
+                self._current_rewards[i] = 0.0
+                self._current_lengths[i] = 0
         return True
 
     def summary(self) -> dict:
@@ -201,25 +212,30 @@ class TensorBoardMetricsCallback(BaseCallback):
     def __init__(self, verbose: int = 0):
         super().__init__(verbose)
         self._ep_rewards: list[float] = []
-        self._ep_current_reward = 0.0
+        self._ep_current_rewards: np.ndarray = np.array([0.0])
         self._kills = 0
         self._total_episodes = 0
         self._last_log_window: int = 0
 
-    def _on_step(self) -> bool:
-        rewards = self.locals.get("rewards", [0.0])
-        self._ep_current_reward += float(rewards[0])
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._ep_current_rewards = np.zeros(n, dtype=np.float64)
 
-        for info in self.locals.get("infos", []):
+    def _on_step(self) -> bool:
+        rewards = self.locals.get("rewards", np.zeros(len(self._ep_current_rewards)))
+        infos = self.locals.get("infos", [])
+        dones = self.locals.get("dones", [])
+
+        for i, info in enumerate(infos):
+            self._ep_current_rewards[i] += float(rewards[i])
             if info.get("kill_a", False):
                 self._kills += 1
 
-        dones = self.locals.get("dones", [])
-        for done in dones:
+        for i, done in enumerate(dones):
             if done:
                 self._total_episodes += 1
-                self._ep_rewards.append(self._ep_current_reward)
-                self._ep_current_reward = 0.0
+                self._ep_rewards.append(float(self._ep_current_rewards[i]))
+                self._ep_current_rewards[i] = 0.0
 
         # Log every 1000 steps (window-based dedup)
         window = self.num_timesteps // 1000
@@ -255,7 +271,7 @@ class WindowSummaryCallback(BaseCallback):
         self._ep_kills: int = 0
         self._ep_timeouts: int = 0
         self._ep_count: int = 0
-        self._ep_current_reward: float = 0.0
+        self._ep_current_rewards: np.ndarray = np.array([0.0])
         # Previous window stats for comparison
         self._prev_dist: float | None = None
         self._prev_reward: float | None = None
@@ -263,27 +279,30 @@ class WindowSummaryCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         self._last_window = self.num_timesteps // self._interval
+        n = self.training_env.num_envs
+        self._ep_current_rewards = np.zeros(n, dtype=np.float64)
 
     def _on_step(self) -> bool:
-        rewards = self.locals.get("rewards", [0.0])
-        self._ep_current_reward += float(rewards[0])
+        rewards = self.locals.get("rewards", np.zeros(len(self._ep_current_rewards)))
+        infos = self.locals.get("infos", [])
+        dones = self.locals.get("dones", [])
 
-        for info in self.locals.get("infos", []):
+        for i, info in enumerate(infos):
+            self._ep_current_rewards[i] += float(rewards[i])
             if info.get("kill_a", False):
                 self._ep_kills += 1
 
-        dones = self.locals.get("dones", [])
-        infos = self.locals.get("infos", [{}])
-        if dones[0]:
-            self._ep_count += 1
-            self._ep_rewards.append(self._ep_current_reward)
-            self._ep_current_reward = 0.0
-            info = infos[0] if infos else {}
-            self._ep_distances.append(info.get("distance", 0.0))
-            if info.get("collision", False):
-                self._ep_crashes += 1
-            if info.get("truncated", False):
-                self._ep_timeouts += 1
+        for i, done in enumerate(dones):
+            if done:
+                self._ep_count += 1
+                self._ep_rewards.append(float(self._ep_current_rewards[i]))
+                self._ep_current_rewards[i] = 0.0
+                info = infos[i] if i < len(infos) else {}
+                self._ep_distances.append(info.get("distance", 0.0))
+                if info.get("collision", False):
+                    self._ep_crashes += 1
+                if info.get("truncated", False):
+                    self._ep_timeouts += 1
 
         window = self.num_timesteps // self._interval
         if window > self._last_window and self._ep_count > 0:
@@ -346,57 +365,66 @@ class EpisodeLoggerCallback(BaseCallback):
         super().__init__(verbose)
         self.log_dir = Path(log_dir)
         self._csv_file = None
-        self._ep_reward = 0.0
-        self._ep_length = 0
+        self._ep_rewards: np.ndarray = np.array([0.0])
+        self._ep_lengths: np.ndarray = np.array([0])
         self._ep_count = 0
 
     def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._ep_rewards = np.zeros(n, dtype=np.float64)
+        self._ep_lengths = np.zeros(n, dtype=np.int64)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._csv_file = open(self.log_dir / "episodes.csv", "w")  # type: ignore[assignment]
         self._csv_file.write(  # type: ignore[attr-defined]
             "episode,timestep,reward,length,kill,death,crash,timeout,lock_progress,distance\n"
         )
 
+    def __del__(self) -> None:
+        if self._csv_file and not self._csv_file.closed:
+            self._csv_file.close()
+
     def _on_step(self) -> bool:
-        rewards = self.locals["rewards"]
-        dones = self.locals["dones"]
-        infos = self.locals.get("infos", [{}])
+        rewards = self.locals.get("rewards", np.zeros(len(self._ep_rewards)))
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
 
-        self._ep_reward += float(rewards[0])
-        self._ep_length += 1
+        for i in range(len(self._ep_rewards)):
+            self._ep_rewards[i] += float(rewards[i])
+            self._ep_lengths[i] += 1
 
-        if dones[0]:
-            self._ep_count += 1
-            info = infos[0] if infos else {}
-            kill = 1 if info.get("kill_a", False) else 0
-            death = 1 if info.get("kill_b", False) else 0
-            crash = 1 if info.get("collision", False) else 0
-            timeout = 1 if info.get("truncated", False) else 0
-            lock_p = info.get("lock_a_progress", 0.0)
-            dist = info.get("distance", 0.0)
+        for i, done in enumerate(dones):
+            if done:
+                self._ep_count += 1
+                info = infos[i] if i < len(infos) else {}
+                kill = 1 if info.get("kill_a", False) else 0
+                death = 1 if info.get("kill_b", False) else 0
+                crash = 1 if info.get("collision", False) else 0
+                timeout = 1 if info.get("truncated", False) else 0
+                lock_p = info.get("lock_a_progress", 0.0)
+                dist = info.get("distance", 0.0)
 
-            self._csv_file.write(  # type: ignore[attr-defined]
-                f"{self._ep_count},{self.num_timesteps},"
-                f"{self._ep_reward:.4f},{self._ep_length},"
-                f"{kill},{death},{crash},{timeout},{lock_p:.4f},{dist:.4f}\n"
-            )
-            self._csv_file.flush()  # type: ignore[attr-defined]
-
-            if self.verbose and self._ep_count % 50 == 0:
-                logger.info(
-                    "Ep %d: reward=%.2f len=%d kill=%d death=%d crash=%d timeout=%d dist=%.2f",
-                    self._ep_count,
-                    self._ep_reward,
-                    self._ep_length,
-                    kill,
-                    death,
-                    crash,
-                    timeout,
-                    dist,
+                self._csv_file.write(  # type: ignore[attr-defined]
+                    f"{self._ep_count},{self.num_timesteps},"
+                    f"{self._ep_rewards[i]:.4f},{self._ep_lengths[i]},"
+                    f"{kill},{death},{crash},{timeout},{lock_p:.4f},{dist:.4f}\n"
                 )
+                self._csv_file.flush()  # type: ignore[attr-defined]
 
-            self._ep_reward = 0.0
-            self._ep_length = 0
+                if self.verbose and self._ep_count % 50 == 0:
+                    logger.info(
+                        "Ep %d: reward=%.2f len=%d kill=%d death=%d crash=%d timeout=%d dist=%.2f",
+                        self._ep_count,
+                        self._ep_rewards[i],
+                        self._ep_lengths[i],
+                        kill,
+                        death,
+                        crash,
+                        timeout,
+                        dist,
+                    )
+
+                self._ep_rewards[i] = 0.0
+                self._ep_lengths[i] = 0
 
         return True
 

@@ -9,8 +9,33 @@ from aces.config import AcesConfig as AcesConfig
 from aces.config import load_configs as load_configs
 from aces.curriculum import CurriculumManager as CurriculumManager
 from aces.env import DroneDogfightEnv as DroneDogfightEnv
-from aces.policy import CnnImuExtractor as CnnImuExtractor
-from aces.training import CurriculumTrainer as CurriculumTrainer
-from aces.training import OpponentPool as OpponentPool
-from aces.training import SelfPlayTrainer as SelfPlayTrainer
 from aces.viz import AcesVisualizer as AcesVisualizer
+
+__all__ = [
+    "AcesConfig",
+    "load_configs",
+    "CurriculumManager",
+    "DroneDogfightEnv",
+    "AcesVisualizer",
+]
+
+
+def __getattr__(name: str):
+    """Lazy import heavy training dependencies."""
+    if name == "CurriculumTrainer":
+        from aces.training import CurriculumTrainer
+
+        return CurriculumTrainer
+    if name == "SelfPlayTrainer":
+        from aces.training import SelfPlayTrainer
+
+        return SelfPlayTrainer
+    if name == "OpponentPool":
+        from aces.training import OpponentPool
+
+        return OpponentPool
+    if name == "CnnImuExtractor":
+        from aces.policy import CnnImuExtractor
+
+        return CnnImuExtractor
+    raise AttributeError(f"module 'aces' has no attribute {name!r}")

@@ -57,6 +57,7 @@ class SelfPlayTrainer:
         fpv: bool = False,
         task: str = "dogfight",
         device: str = "auto",
+        seed: int | None = None,
         **kwargs,
     ):
         cfg = load_configs(config_dir)
@@ -94,6 +95,7 @@ class SelfPlayTrainer:
         self._task = task
         self._wind_sigma = wind_sigma
         self._obs_noise_std = obs_noise_std
+        self._seed = seed
 
         self.env = DroneDogfightEnv(
             config_dir=config_dir,
@@ -126,20 +128,15 @@ class SelfPlayTrainer:
             verbose=0,
             policy_kwargs=policy_kwargs,
             device=device,
+            seed=seed,
         )
 
         self._setup_opponent()
 
     def _resolve_policy(self) -> tuple[str, dict | None]:
-        """Return (policy_name, policy_kwargs) based on observation mode."""
-        if self._fpv:
-            from aces.policy.extractors import CnnImuExtractor
+        from aces.training import resolve_policy
 
-            return "MultiInputPolicy", {
-                "features_extractor_class": CnnImuExtractor,
-                "features_extractor_kwargs": {"features_dim": 192},
-            }
-        return "MlpPolicy", None
+        return resolve_policy(self._fpv)
 
     def _setup_opponent(self):
         """Wire opponent policy into the environment."""

@@ -41,16 +41,19 @@ impl DroneState {
     }
 
     /// Forward direction unit vector in world frame.
+    #[inline]
     pub fn forward(&self) -> Vector3<f64> {
         self.attitude * Vector3::x()
     }
 
     /// Distance to another drone.
+    #[inline]
     pub fn distance_to(&self, other: &DroneState) -> f64 {
         (other.position - self.position).norm()
     }
 
     /// Angle between forward direction and vector to other drone (radians).
+    #[inline]
     pub fn angle_to(&self, other: &DroneState) -> f64 {
         let to_other = other.position - self.position;
         let dist = to_other.norm();

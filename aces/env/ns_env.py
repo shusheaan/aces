@@ -49,8 +49,6 @@ class NeuralSymbolicEnv(gym.Env):
 
     def set_mppi(self, mppi_controller):
         """Set the MPPI controller for low-level execution."""
-        from aces.neural_symbolic import NeuralSymbolicPolicy
-
         self._ns_policy = NeuralSymbolicPolicy(mppi_controller)
 
     def reset(self, *, seed=None, options=None):

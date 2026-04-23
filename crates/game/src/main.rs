@@ -9,6 +9,7 @@ mod marker;
 mod perception;
 mod policy;
 mod simulation;
+mod weights;
 
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::prelude::*;

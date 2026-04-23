@@ -20,16 +20,24 @@ pub struct ActuatorModel {
     pub bias: Vector4<f64>,
     /// Whether the model is enabled
     pub enabled: bool,
+    /// Cached normal distribution for multiplicative noise (avoids recreating on every call)
+    noise_normal: Option<Normal<f64>>,
 }
 
 impl ActuatorModel {
     pub fn new(time_constant: f64, noise_std: f64) -> Self {
+        let noise_normal = if noise_std > 0.0 {
+            Some(Normal::new(0.0, noise_std).unwrap())
+        } else {
+            None
+        };
         Self {
             thrust_state: Vector4::zeros(),
             time_constant,
             noise_std,
             bias: Vector4::zeros(),
             enabled: time_constant > 0.0 || noise_std > 0.0,
+            noise_normal,
         }
     }
 
@@ -40,6 +48,7 @@ impl ActuatorModel {
             noise_std: 0.0,
             bias: Vector4::zeros(),
             enabled: false,
+            noise_normal: None,
         }
     }
 
@@ -83,8 +92,7 @@ impl ActuatorModel {
         let mut output = self.thrust_state;
 
         // Multiplicative noise
-        if self.noise_std > 0.0 {
-            let normal = Normal::new(0.0, self.noise_std).unwrap();
+        if let Some(ref normal) = self.noise_normal {
             for i in 0..4 {
                 output[i] *= 1.0 + normal.sample(rng);
             }

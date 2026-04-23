@@ -69,6 +69,7 @@ impl Arena {
 
     /// Signed distance to the nearest boundary wall.
     /// Negative means outside bounds.
+    #[inline]
     pub fn boundary_sdf(&self, p: &Vector3<f64>) -> f64 {
         let dx_min = p.x;
         let dx_max = self.bounds.x - p.x;
@@ -86,6 +87,7 @@ impl Arena {
     }
 
     /// Signed distance to nearest obstacle.
+    #[inline]
     pub fn obstacle_sdf(&self, p: &Vector3<f64>) -> f64 {
         self.obstacles
             .iter()
@@ -94,6 +96,7 @@ impl Arena {
     }
 
     /// Combined SDF: minimum of boundary and obstacle distances.
+    #[inline]
     pub fn sdf(&self, p: &Vector3<f64>) -> f64 {
         self.boundary_sdf(p).min(self.obstacle_sdf(p))
     }

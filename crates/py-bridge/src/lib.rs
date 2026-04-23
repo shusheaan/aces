@@ -208,6 +208,41 @@ fn v3(a: [f64; 3]) -> Vector3<f64> {
     Vector3::new(a[0], a[1], a[2])
 }
 
+/// Update both particle filters for one control step.
+///
+/// Extracted from `Simulation::step` so that `rng`, `pf_a`/`pf_b`, and `arena`
+/// can each be borrowed independently without resorting to `mem::replace`.
+#[allow(clippy::too_many_arguments)]
+fn step_particle_filters(
+    pf_a: &mut ParticleFilter,
+    pf_b: &mut ParticleFilter,
+    arena: &Arena,
+    noisy_b: &Vector3<f64>,
+    noisy_a: &Vector3<f64>,
+    a_sees_b: bool,
+    b_sees_a: bool,
+    dt_ctrl: f64,
+    time_since_a_saw_b: &mut f64,
+    time_since_b_saw_a: &mut f64,
+    rng: &mut rand::rngs::StdRng,
+) {
+    pf_a.predict_with_sdf(dt_ctrl, |p| arena.sdf(p), rng);
+    if a_sees_b {
+        pf_a.update(noisy_b, rng);
+        *time_since_a_saw_b = 0.0;
+    } else {
+        *time_since_a_saw_b += dt_ctrl;
+    }
+
+    pf_b.predict_with_sdf(dt_ctrl, |p| arena.sdf(p), rng);
+    if b_sees_a {
+        pf_b.update(noisy_a, rng);
+        *time_since_b_saw_a = 0.0;
+    } else {
+        *time_since_b_saw_a += dt_ctrl;
+    }
+}
+
 #[pymethods]
 impl Simulation {
     #[new]
@@ -521,35 +556,19 @@ impl Simulation {
         let ekf_a_vel = self.ekf_b.velocity();
 
         // --- Particle filter: predict with SDF constraints, update only when visible ---
-        // Temporarily extract rng to avoid borrow conflicts with self.pf_a/pf_b/arena
-        let mut rng = std::mem::replace(&mut self.rng, rand::rngs::StdRng::seed_from_u64(0));
-
-        {
-            let arena = &self.arena;
-            self.pf_a
-                .predict_with_sdf(self.dt_ctrl, |p| arena.sdf(p), &mut rng);
-        }
-        if a_sees_b {
-            self.pf_a.update(&noisy_b, &mut rng);
-            self.time_since_a_saw_b = 0.0;
-        } else {
-            self.time_since_a_saw_b += self.dt_ctrl;
-        }
-
-        {
-            let arena = &self.arena;
-            self.pf_b
-                .predict_with_sdf(self.dt_ctrl, |p| arena.sdf(p), &mut rng);
-        }
-        if b_sees_a {
-            self.pf_b.update(&noisy_a, &mut rng);
-            self.time_since_b_saw_a = 0.0;
-        } else {
-            self.time_since_b_saw_a += self.dt_ctrl;
-        }
-
-        // Restore the rng
-        self.rng = rng;
+        step_particle_filters(
+            &mut self.pf_a,
+            &mut self.pf_b,
+            &self.arena,
+            &noisy_b,
+            &noisy_a,
+            a_sees_b,
+            b_sees_a,
+            self.dt_ctrl,
+            &mut self.time_since_a_saw_b,
+            &mut self.time_since_b_saw_a,
+            &mut self.rng,
+        );
 
         // --- Belief state: use EKF when visible, particle filter when occluded ---
         let (belief_b_pos, belief_b_var) = if a_sees_b {
@@ -583,7 +602,7 @@ impl Simulation {
             // Drone A camera
             if self.cam_time_since_render_a >= render_interval {
                 let rot_a = self.drone_a.attitude.to_rotation_matrix();
-                let frame = render_depth(
+                let mut frame = render_depth(
                     cam,
                     &self.arena,
                     &self.drone_a.position,
@@ -601,7 +620,11 @@ impl Simulation {
                     self.cam_drone_radius,
                     self.cam_min_conf_dist,
                 );
-                depth_image_a = Some(frame.depth.clone());
+                // Move depth data into StepResult to avoid a 300KB clone.
+                // last_frame_a retains metadata (width/height/timestamp) with
+                // an empty depth vec, since depth is only needed in StepResult.
+                let depth = std::mem::take(&mut frame.depth);
+                depth_image_a = Some(depth);
                 self.last_frame_a = Some(frame);
                 self.last_det_a = Some(det);
                 self.cam_time_since_render_a = 0.0;
@@ -611,7 +634,7 @@ impl Simulation {
             // Drone B camera
             if self.cam_time_since_render_b >= render_interval {
                 let rot_b = self.drone_b.attitude.to_rotation_matrix();
-                let frame = render_depth(
+                let mut frame = render_depth(
                     cam,
                     &self.arena,
                     &self.drone_b.position,
@@ -629,7 +652,8 @@ impl Simulation {
                     self.cam_drone_radius,
                     self.cam_min_conf_dist,
                 );
-                depth_image_b = Some(frame.depth.clone());
+                let depth = std::mem::take(&mut frame.depth);
+                depth_image_b = Some(depth);
                 self.last_frame_b = Some(frame);
                 self.last_det_b = Some(det);
                 self.cam_time_since_render_b = 0.0;

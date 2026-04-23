@@ -70,25 +70,8 @@ class DroneDogfightEnv(gym.Env):
 
         self._task = task
 
-        # Task-specific reward overrides
-        _TASK_REWARD_OVERRIDES = {
-            "pursuit_linear": {
-                "approach_reward": 5.0,
-                "info_gain_reward": 0.0,
-                "lost_contact_penalty": 0.0,
-            },
-            "pursuit_evasive": {
-                "approach_reward": 3.0,
-            },
-            "search_pursuit": {
-                "approach_reward": 3.0,
-                "info_gain_reward": 0.1,
-                "lost_contact_penalty": 0.02,
-            },
-            "dogfight": {},
-            "hover": {},
-        }
-        for key, val in _TASK_REWARD_OVERRIDES.get(task, {}).items():
+        # Task-specific reward overrides from config
+        for key, val in cfg.rules.task_reward_overrides.get(task, {}).items():
             self._reward_cfg[key] = val
 
         # Trajectory state for pursuit_linear task
@@ -628,7 +611,8 @@ class DroneDogfightEnv(gym.Env):
             inertia_scale = 1.0 + self.np_random.uniform(
                 -self._dr.inertia_range, self._dr.inertia_range
             )
-            self._inertia = [i * inertia_scale for i in self._nominal_inertia]
+            scaled = [i * inertia_scale for i in self._nominal_inertia]
+            self._inertia = (scaled[0], scaled[1], scaled[2])
             self._sim = self._build_sim()
             self._hover_thrust = self._sim.hover_thrust()
 
@@ -814,10 +798,10 @@ class DroneDogfightEnv(gym.Env):
         elif result.kill_a:
             reward = float(rcfg["kill_reward"])
             terminated = True
-        # Opponent crashes — in pursuit tasks, don't reward free crashes
+        # Opponent crashes — use per-task override if available
         elif result.drone_b_collision or result.drone_b_oob:
-            if self._task in ("pursuit_linear", "pursuit_evasive", "search_pursuit"):
-                reward = 0.0
+            if "opponent_crash_reward" in rcfg:
+                reward = float(rcfg["opponent_crash_reward"])
             else:
                 reward = float(rcfg["kill_reward"]) * 0.5
             terminated = True

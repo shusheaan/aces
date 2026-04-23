@@ -61,7 +61,7 @@ pub fn rollout_with_wind<R: Rng>(
 
     // Clone wind model so each rollout starts from the same state
     // but evolves independently
-    let mut wind = wind_model.clone();
+    let mut wind = *wind_model;
     let mut max_penetration = f64::NEG_INFINITY;
 
     for u in controls {

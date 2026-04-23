@@ -1,10 +1,12 @@
 //! Load and run a trained MLP policy exported from Python.
 //!
-//! Binary format (little-endian): see `aces/export.py`.
+//! Binary format (little-endian): see `aces/export.py` and `crates/game/src/weights.rs`.
 //! Pure nalgebra, zero extra dependencies.
 
 use aces_sim_core::state::DroneState;
 use nalgebra::{DMatrix, DVector};
+
+use crate::weights::load_mlp_weights;
 
 /// A loaded MLP actor network (typically 21→64→64→4 with Tanh).
 pub struct MlpPolicy {
@@ -16,56 +18,7 @@ pub struct MlpPolicy {
 impl MlpPolicy {
     /// Try to load a policy from the binary file. Returns `None` on any error.
     pub fn load(path: &str, hover_thrust: f64, max_thrust: f64) -> Option<Self> {
-        let data = std::fs::read(path).ok()?;
-        let mut cur = 0_usize;
-
-        let read_u32 = |c: &mut usize| -> Option<u32> {
-            if *c + 4 > data.len() {
-                return None;
-            }
-            let v = u32::from_le_bytes(data[*c..*c + 4].try_into().ok()?);
-            *c += 4;
-            Some(v)
-        };
-
-        let num_layers = read_u32(&mut cur)? as usize;
-        let mut layers = Vec::with_capacity(num_layers);
-
-        for _ in 0..num_layers {
-            let rows = read_u32(&mut cur)? as usize;
-            let cols = read_u32(&mut cur)? as usize;
-
-            // Weight: rows × cols f32, row-major
-            let w_len = rows * cols;
-            let w_bytes = w_len * 4;
-            if cur + w_bytes > data.len() {
-                return None;
-            }
-            let mut w_data = Vec::with_capacity(w_len);
-            for i in 0..w_len {
-                let off = cur + i * 4;
-                let v = f32::from_le_bytes(data[off..off + 4].try_into().ok()?);
-                w_data.push(v as f64);
-            }
-            cur += w_bytes;
-            let weight = DMatrix::from_row_slice(rows, cols, &w_data);
-
-            // Bias: rows f32
-            let b_bytes = rows * 4;
-            if cur + b_bytes > data.len() {
-                return None;
-            }
-            let mut b_data = Vec::with_capacity(rows);
-            for i in 0..rows {
-                let off = cur + i * 4;
-                let v = f32::from_le_bytes(data[off..off + 4].try_into().ok()?);
-                b_data.push(v as f64);
-            }
-            cur += b_bytes;
-            let bias = DVector::from_vec(b_data);
-
-            layers.push((weight, bias));
-        }
+        let layers = load_mlp_weights(path)?;
 
         // Sanity check: first layer input should be 21 (vector obs)
         if let Some((w, _)) = layers.first() {

@@ -127,6 +127,11 @@ class LagrangianCallback(BaseCallback):
         super().__init__()
         self.lagr = lagr
         self._step_costs: list[float] = []
+        self._current_episode_costs: np.ndarray = np.array([0.0])
+
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._current_episode_costs = np.zeros(n, dtype=np.float64)
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
@@ -137,15 +142,12 @@ class LagrangianCallback(BaseCallback):
         for i, info in enumerate(infos):
             cost = self.lagr._compute_cost(info)
             self._step_costs.append(cost)
-            # Subtract Lagrangian penalty from reward
-            if rewards is not None:
-                rewards[i] -= self.lagr.lam * cost
+            rewards[i] -= self.lagr.lam * cost
 
-            # Track episode costs
-            self.lagr._current_episode_cost += cost
+            self._current_episode_costs[i] += cost
             if info.get("terminated", False) or info.get("truncated", False):
-                self.lagr._episode_costs.append(self.lagr._current_episode_cost)
-                self.lagr._current_episode_cost = 0.0
+                self.lagr._episode_costs.append(float(self._current_episode_costs[i]))
+                self._current_episode_costs[i] = 0.0
 
         return True
 

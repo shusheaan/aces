@@ -32,6 +32,7 @@ class OpponentPool:
         self._pool_dir.mkdir(parents=True, exist_ok=True)
         self._max_size = max_size
         self._entries: list[PoolEntry] = []
+        self.agent_elo: float = 1000.0
 
     @property
     def size(self) -> int:
@@ -72,7 +73,7 @@ class OpponentPool:
 
         return entry_id
 
-    def sample(self, env=None) -> tuple:
+    def sample(self, env=None, rng: np.random.Generator | None = None) -> tuple:
         """Sample an opponent weighted by Elo (softmax over elo/400).
 
         Returns ``(policy, metadata)`` where *policy* is the loaded SB3
@@ -81,6 +82,8 @@ class OpponentPool:
         if self.size == 0:
             raise ValueError("Cannot sample from an empty pool")
 
+        _rng = rng if rng is not None else np.random.default_rng()
+
         elos = np.array([e.elo for e in self._entries], dtype=np.float64)
         logits = elos / 400.0
         # Numerically stable softmax.
@@ -88,27 +91,24 @@ class OpponentPool:
         weights = np.exp(logits)
         weights /= weights.sum()
 
-        idx = np.random.choice(len(self._entries), p=weights)
+        idx = int(_rng.choice(len(self._entries), p=weights))
         entry = self._entries[idx]
 
         loaded_model = PPO.load(entry.path, env=env)
         return loaded_model.policy, entry.metadata
 
     def update_elo(self, agent_won: bool, opponent_id: str) -> None:
-        """Standard Elo update with K=32.
-
-        When the agent wins the opponent's Elo decreases (and vice-versa).
-        We treat the *agent* as a fixed 1000-Elo reference so only the
-        opponent's rating moves.
-        """
+        """Standard Elo update with K=32. Updates both agent and opponent."""
         entry = self._get_entry(opponent_id)
         K = 32
-        agent_elo = 1000.0
 
-        expected_opponent = 1.0 / (1.0 + 10.0 ** ((agent_elo - entry.elo) / 400.0))
+        expected_agent = 1.0 / (1.0 + 10.0 ** ((entry.elo - self.agent_elo) / 400.0))
+        expected_opponent = 1.0 - expected_agent
 
-        # Opponent's actual score: 0 if agent won, 1 if agent lost.
-        actual_opponent = 0.0 if agent_won else 1.0
+        actual_agent = 1.0 if agent_won else 0.0
+        actual_opponent = 1.0 - actual_agent
+
+        self.agent_elo += K * (actual_agent - expected_agent)
         entry.elo += K * (actual_opponent - expected_opponent)
 
     # ------------------------------------------------------------------
@@ -120,6 +120,7 @@ class OpponentPool:
         return {
             "pool_dir": str(self._pool_dir),
             "max_size": self._max_size,
+            "agent_elo": self.agent_elo,
             "entries": [
                 {
                     "id": e.id,
@@ -135,6 +136,7 @@ class OpponentPool:
         """Restore pool from a previously saved *state_dict*."""
         self._pool_dir = Path(state["pool_dir"])
         self._max_size = state["max_size"]
+        self.agent_elo = state.get("agent_elo", 1000.0)
         self._entries = [
             PoolEntry(
                 id=e["id"],

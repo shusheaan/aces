@@ -83,7 +83,7 @@ min_confidence_distance = 5.0 # Distance at which confidence drops to 0
 kill_reward = 100.0
 killed_penalty = -100.0
 collision_penalty = -50.0
-lock_progress_reward = 0.1
+lock_progress_reward = 5.0
 control_penalty = 0.01
 approach_reward = 0.05
 survival_bonus = 0.01
@@ -91,3 +91,26 @@ survival_bonus = 0.01
 # Level 3: Information-theoretic exploration rewards
 info_gain_reward = 0.02           # Reward for reducing belief uncertainty
 lost_contact_penalty = 0.005      # Penalty per second of lost visual contact
+
+[task_reward_overrides.pursuit_linear]
+approach_reward = 5.0
+opponent_crash_reward = 0.0
+info_gain_reward = 0.0
+lost_contact_penalty = 0.0
+
+[task_reward_overrides.pursuit_evasive]
+approach_reward = 3.0
+
+[task_reward_overrides.search_pursuit]
+approach_reward = 2.0
+info_gain_reward = 0.1
+lost_contact_penalty = 0.02
+
+[task_reward_overrides.dogfight]
+approach_reward = 3.0
+opponent_crash_reward = 5.0
+
+[task_reward_overrides.search_destroy]
+approach_reward = 2.0
+
+[task_reward_overrides.hover]

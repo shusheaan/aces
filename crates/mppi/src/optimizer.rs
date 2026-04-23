@@ -8,13 +8,14 @@ use aces_sim_core::state::DroneState;
 use aces_sim_core::wind::WindModel;
 use nalgebra::Vector4;
 use rand::distributions::Distribution;
+use rand::rngs::SmallRng;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_distr::Normal;
 use rayon::prelude::*;
 
 /// Configuration for risk-aware MPPI with CVaR filtering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct RiskConfig {
     /// Wind model parameters for rollout sampling
     pub wind: WindModel,
@@ -72,6 +73,9 @@ pub struct MppiOptimizer {
     pub chance_constraint: Option<ChanceConstraintConfig>,
     /// Current Lagrange multiplier for the collision chance constraint
     pub lambda_cc: f64,
+    /// Pre-allocated control buffers: one Vec per sample, capacity = horizon.
+    /// Reused each call to avoid per-call heap allocation.
+    ctrl_buffers: Vec<Vec<Vector4<f64>>>,
 }
 
 impl MppiOptimizer {
@@ -89,6 +93,10 @@ impl MppiOptimizer {
     ) -> Self {
         let hover = params.hover_thrust();
         let hover_vec = Vector4::new(hover, hover, hover, hover);
+        // Pre-allocate one control buffer per sample to avoid per-call heap allocation.
+        let ctrl_buffers = (0..num_samples)
+            .map(|_| Vec::with_capacity(horizon))
+            .collect();
         Self {
             num_samples,
             horizon,
@@ -103,6 +111,7 @@ impl MppiOptimizer {
             risk: None,
             chance_constraint: None,
             lambda_cc: 0.0,
+            ctrl_buffers,
         }
     }
 
@@ -186,31 +195,34 @@ impl MppiOptimizer {
             (0..self.num_samples).map(|_| rng.gen()).collect()
         };
 
-        let risk = self.risk.clone();
+        let risk = self.risk;
 
-        // Parallel: generate perturbed sequences, rollout, compute costs
-        let mut results: Vec<(Vec<Vector4<f64>>, f64, f64)> = seeds
-            .par_iter()
-            .map(|&seed| {
-                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        // Parallel: generate perturbed sequences, rollout, compute costs.
+        // ctrl_buffers provides one pre-allocated Vec per sample to avoid heap allocations.
+        let mut results: Vec<(Vec<Vector4<f64>>, f64, f64)> = self
+            .ctrl_buffers
+            .par_iter_mut()
+            .zip(seeds.par_iter())
+            .map(|(ctrl_buf, &seed)| {
+                let mut rng = SmallRng::seed_from_u64(seed);
                 let normal = Normal::new(0.0, self.noise_std).unwrap();
 
-                let controls: Vec<Vector4<f64>> = (0..self.horizon)
-                    .map(|t| {
-                        let mean = self.mean_controls[t];
-                        Vector4::new(
-                            (mean[0] + normal.sample(&mut rng)).clamp(0.0, max_t),
-                            (mean[1] + normal.sample(&mut rng)).clamp(0.0, max_t),
-                            (mean[2] + normal.sample(&mut rng)).clamp(0.0, max_t),
-                            (mean[3] + normal.sample(&mut rng)).clamp(0.0, max_t),
-                        )
-                    })
-                    .collect();
+                // Reuse the pre-allocated buffer: clear and fill for this sample.
+                ctrl_buf.clear();
+                for t in 0..self.horizon {
+                    let mean = self.mean_controls[t];
+                    ctrl_buf.push(Vector4::new(
+                        (mean[0] + normal.sample(&mut rng)).clamp(0.0, max_t),
+                        (mean[1] + normal.sample(&mut rng)).clamp(0.0, max_t),
+                        (mean[2] + normal.sample(&mut rng)).clamp(0.0, max_t),
+                        (mean[3] + normal.sample(&mut rng)).clamp(0.0, max_t),
+                    ));
+                }
 
                 let (states, max_penetration) = if let Some(ref risk_cfg) = risk {
                     let result = rollout_with_wind(
                         self_state,
-                        &controls,
+                        ctrl_buf,
                         &self.params,
                         &self.arena,
                         self.dt_ctrl,
@@ -222,7 +234,7 @@ impl MppiOptimizer {
                 } else {
                     let states = rollout(
                         self_state,
-                        &controls,
+                        ctrl_buf,
                         &self.params,
                         self.dt_ctrl,
                         self.substeps,
@@ -235,7 +247,7 @@ impl MppiOptimizer {
                     total_cost += cost_fn(
                         state,
                         enemy_state,
-                        &controls[t],
+                        &ctrl_buf[t],
                         hover,
                         &self.arena,
                         &self.weights,
@@ -247,7 +259,7 @@ impl MppiOptimizer {
                     total_cost += 1e8;
                 }
 
-                (controls, total_cost, max_penetration)
+                (ctrl_buf.clone(), total_cost, max_penetration)
             })
             .collect();
 
@@ -256,10 +268,13 @@ impl MppiOptimizer {
         if apply_cvar {
             if let Some(ref risk_cfg) = self.risk {
                 if risk_cfg.cvar_alpha > 0.0 && risk_cfg.cvar_alpha < 1.0 {
-                    let mut sorted_costs = costs.clone();
-                    sorted_costs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let idx = ((1.0 - risk_cfg.cvar_alpha) * sorted_costs.len() as f64) as usize;
-                    let threshold = sorted_costs[idx.min(sorted_costs.len() - 1)];
+                    // Use select_nth_unstable to find the CVaR threshold in O(n)
+                    // instead of O(n log n) sort. Work on a mutable copy.
+                    let k = ((1.0 - risk_cfg.cvar_alpha) * costs.len() as f64) as usize;
+                    let k = k.min(costs.len() - 1);
+                    let mut costs_scratch = costs.clone();
+                    costs_scratch.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap());
+                    let threshold = costs_scratch[k];
 
                     for c in costs.iter_mut() {
                         if *c >= threshold {
