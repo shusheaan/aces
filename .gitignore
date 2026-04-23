@@ -10,8 +10,7 @@ dist/
 *.pyc
 .ruff_cache/
 logs/
-*.bin
 aces_model*/
-policy.bin
-perception.bin
+/policy.bin
+/perception.bin
 checkpoints/

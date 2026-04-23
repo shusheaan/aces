@@ -39,6 +39,9 @@ class OpponentUpdateCallback(BaseCallback):
         self.update_count = 0
         self._last_update_window: int = 0
 
+    def _on_training_start(self) -> None:
+        self._last_update_window = self.num_timesteps // self.update_interval
+
     def _on_step(self) -> bool:
         window = self.num_timesteps // self.update_interval
         if window > self._last_update_window:
@@ -72,6 +75,7 @@ class VecOpponentUpdateCallback(BaseCallback):
         self._last_update_window: int = 0
 
     def _on_training_start(self) -> None:
+        self._last_update_window = self.num_timesteps // self.update_interval
         # If wrapped with BatchedOpponentVecEnv, initialize opponent policy
         env = self.training_env
         if hasattr(env, "set_opponent_policy") and not env.has_opponent:  # type: ignore[attr-defined]
@@ -113,6 +117,7 @@ class PoolOpponentCallback(BaseCallback):
         self._last_sample_window: int = 0
 
     def _on_training_start(self) -> None:
+        self._last_sample_window = self.num_timesteps // self._sample_interval
         # Initialize batched opponent if wrapper is present
         env = self.training_env
         if (
@@ -211,7 +216,7 @@ class TensorBoardMetricsCallback(BaseCallback):
         self._ep_current_reward = 0.0
         self._kills = 0
         self._total_episodes = 0
-        self._last_log_window: int = -1
+        self._last_log_window: int = 0
 
     def _on_step(self) -> bool:
         rewards = self.locals.get("rewards", [0.0])
@@ -330,6 +335,9 @@ class CheckpointResumeCallback(BaseCallback):
         self._checkpoint_dir = checkpoint_dir
         self._interval = interval
         self._last_ckpt_window: int = 0
+
+    def _on_training_start(self) -> None:
+        self._last_ckpt_window = self.num_timesteps // self._interval
 
     def _on_step(self) -> bool:
         window = self.num_timesteps // self._interval
