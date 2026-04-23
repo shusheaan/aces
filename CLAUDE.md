@@ -14,16 +14,30 @@ aces/
 │   ├── estimator/              #   EKF + particle filter
 │   ├── py-bridge/              #   PyO3 bindings -> aces._core
 │   └── game/                   #   Bevy 3D interactive visualizer + NN policy loading
-├── aces/                       # Python package (10 modules)
-│   ├── env.py                  #   Gymnasium environment (vector 21-dim / FPV dict)
-│   ├── trainer.py              #   Self-play PPO (MLP + CNN policies)
-│   ├── curriculum.py           #   Phase definitions + CurriculumManager
-│   ├── opponent_pool.py        #   Elo-rated opponent pool for self-play
-│   ├── trajectory.py           #   Circle/lemniscate/patrol for curriculum
-│   ├── policy.py               #   CnnImuExtractor for FPV depth images
-│   ├── export.py               #   MLP weight -> binary for Bevy inference
+├── aces/                       # Python package (subpackages)
 │   ├── config.py               #   Typed TOML config loading
-│   └── viz.py                  #   Rerun 3D + depth image visualization
+│   ├── curriculum.py           #   Phase definitions + CurriculumManager
+│   ├── viz.py                  #   Rerun 3D + depth image visualization
+│   ├── env/                    #   Environment subpackage
+│   │   ├── dogfight.py         #     Gymnasium environment (vector 21-dim / FPV dict)
+│   │   ├── ns_env.py           #     Neural-symbolic environment wrapper
+│   │   └── trajectory.py       #     Circle/lemniscate/patrol for curriculum
+│   ├── training/               #   Training subpackage
+│   │   ├── self_play.py        #     Self-play PPO trainer
+│   │   ├── curriculum_trainer.py #   Curriculum-based multi-phase trainer
+│   │   ├── callbacks.py        #     SB3 training callbacks
+│   │   ├── evaluate.py         #     Model evaluation utilities
+│   │   ├── opponent_pool.py    #     Elo-rated opponent pool
+│   │   ├── batched_vec_env.py  #     Batched opponent inference VecEnv
+│   │   └── logging.py          #     Structured logging + run metadata
+│   ├── policy/                 #   Policy subpackage
+│   │   ├── extractors.py       #     CnnImuExtractor for FPV depth images
+│   │   ├── constrained_ppo.py  #     Lagrangian PPO for constraint handling
+│   │   └── export.py           #     MLP weight -> binary for Bevy inference
+│   └── perception/             #   Perception subpackage
+│       ├── neural_symbolic.py  #     Neural-symbolic MPPI policy
+│       ├── oracle.py           #     God Oracle ground truth labels
+│       └── perception_net.py   #     Supervised perception network
 ├── configs/                    # TOML configs (drone, arena, rules, curriculum)
 ├── scripts/                    # run.py, train_server.py, pre-commit hooks
 ├── tests/                      # 142 tests (57 Rust + 85 Python)
@@ -62,3 +76,4 @@ python scripts/train_server.py --n-envs 8  # headless server training
 - Physics: 1000 Hz, control: 100 Hz, camera: 30 Hz
 - All parameters in `configs/*.toml`, never hardcoded
 - Linting: `ruff` (Python), `cargo clippy` (Rust)
+- Commit messages: one-line summary, no signatures or co-author trailers
