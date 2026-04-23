@@ -219,7 +219,30 @@ V2 uses the corrected roll-axis motor mixing (reviewer-identified bug fix). The 
 | V2 (fixed PD, new reward, 100k) | 2% | 11.45 | 10.2 | -0.86 |
 | **V3 (fixed PD, 200k)** | **1.5%** | **10.93** | **9.8** | **+1.74** |
 
-**Key insight**: With correct rewards and PD, the agent learns genuine approach behavior but slowly. 200k steps yields 0.76m improvement. Full convergence to lock-on range (2m) likely needs 1-2M steps, consistent with the curriculum.toml spec of 200k-2M per stage.
+### Experiment 10: VecNormalize Pursuit 200k (No Hover, From Scratch)
+
+Tests whether VecNormalize alone can replace hover pretraining.
+
+| Window | Crash | Dist | Reward |
+|--------|-------|------|--------|
+| 1 | 42% | 11.59 | -4.42 |
+| 3 | 15% | 11.49 | -1.54 |
+| 5 | **7%** | **11.47** | **-0.66** |
+
+**Conclusion**: VecNormalize learns crash avoidance on its own (42%→7%) but no approach learning (dist stays ~11.5). Does NOT replace hover pretraining.
+
+### Final All-Experiments Comparison (Last 300 Episodes)
+
+| # | Experiment | Crash | Last Dist | Min | Approach | Reward |
+|---|-----------|-------|-----------|-----|----------|--------|
+| 1 | No hover, old reward (50k) | 37% | 11.51 | 10.1 | -0.13m | +13.2 (fake) |
+| 2 | Hover, old reward (100k) | 1% | 11.25 | 10.2 | +0.20m | +49.9 (fake) |
+| 3 | Hover, new reward, broken PD (100k) | 4% | 10.67 | 7.0 | +0.57m | +1.68 |
+| 4 | Hover, new reward, fixed PD (100k) | 2% | 11.45 | 10.2 | +0.28m | -0.86 |
+| **5** | **Hover, fixed PD (200k)** | **1%** | **10.93** | **9.8** | **+0.76m** | **+2.07** |
+| 6 | VecNorm only, no hover (200k) | 6% | 11.37 | 9.8 | +0.21m | -0.38 |
+
+**Best configuration**: Hover pretraining (100k) + new reward (approach=5.0, opp_crash=0) + fixed PD + 200k steps = 1% crash, 0.76m approach, positive reward. Full convergence to lock-on (2m) needs ~1-2M steps.
 
 ---
 
