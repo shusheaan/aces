@@ -189,15 +189,24 @@ Launched but ran on old code (without hover fix). Only completed partial stage 0
 | Ep 801-1000 | **10.64** | **7.0** | **+0.13** | 8% |
 | Ep 1001-1343 | **10.67** | **7.4** | **+2.0** | 4% |
 
-**Conclusion**: With fixed reward (approach=5.0, opp_crash=0, better PD), the agent shows genuine approach learning. Min distance dropped from 9.8 to 7.0m. Reward turned positive. Crash rate spiked during exploration (16%) then stabilized (4%). Still needs more training (~500k+) to reach lock-on distance of 2m.
+**Conclusion**: With fixed reward and broken PD (v1), the agent shows approach learning (min dist 7.0m). But this was partly from the opponent's erratic oscillations bringing it closer. With corrected PD (v2, Experiment 8), the stable opponent is harder — 100k steps isn't enough.
 
-### Comparison: Old vs New Pursuit Reward (Last 300 Episodes)
+### Experiment 8: Pursuit v2 with Corrected Motor Mixing (100k)
 
-| Metric | Old Reward | New Reward |
-|--------|-----------|------------|
-| Mean distance | 11.25m (no approach) | **10.67m** (approaching) |
-| Min distance | 10.2m | **7.4m** (4m closer) |
-| Mean reward | +49.9 (fake, from opp crash) | +1.68 (real, from approach) |
+V2 uses the corrected roll-axis motor mixing (reviewer-identified bug fix). The trajectory opponent is now much more stable.
+
+**Result**: Mean dist 11.45m, min dist 10.2m — less approach than v1. This confirms the v1 approach learning was partly from exploiting the opponent's erratic behavior, not genuine pursuit skill.
+
+### All Pursuit Experiments Summary (Last 300 Episodes)
+
+| Experiment | Crash | Mean Dist | Min Dist | Reward |
+|-----------|-------|-----------|----------|--------|
+| Baseline (no hover, old reward) | 37% | 11.51 | 10.5 | +13.2 (fake) |
+| V0 (hover, old reward) | 1% | 11.25 | 10.2 | +49.9 (fake) |
+| V1 (broken PD, new reward) | 4% | **10.67** | **7.4** | +1.68 |
+| V2 (fixed PD, new reward) | 2% | 11.45 | 10.2 | -0.86 |
+
+**Key insight**: The fixed PD opponent is genuinely stable, making pursuit harder. 100k steps is insufficient — the curriculum.toml specifies 200k for this stage. The reward and PD fixes are correct; the agent simply needs more training time.
 | Crash rate | 1% | 4% |
 
 ---
