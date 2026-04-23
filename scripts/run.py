@@ -155,6 +155,10 @@ def run_train(args):
         task=args.task,
     )
 
+    if args.resume:
+        print(f"[ACES] Resuming from {args.resume}...")
+        trainer.load(args.resume)
+
     print(
         f"[ACES] Training for {timesteps} timesteps "
         f"(obs: {mode_str}, noise: {noise_str})..."
@@ -244,7 +248,13 @@ def main():
     parser.add_argument(
         "--task",
         default="dogfight",
-        choices=["pursuit_linear", "pursuit_evasive", "search_pursuit", "dogfight"],
+        choices=[
+            "hover",
+            "pursuit_linear",
+            "pursuit_evasive",
+            "search_pursuit",
+            "dogfight",
+        ],
         help="Curriculum task / difficulty stage",
     )
     parser.add_argument("--save-path", default="aces_model")
@@ -266,6 +276,13 @@ def main():
         type=float,
         default=None,
         help="Override observation noise std (0 to disable)",
+    )
+
+    # Resume from checkpoint
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume training from a saved model path (e.g., aces_model)",
     )
 
     # Evaluate mode
@@ -295,7 +312,13 @@ def main():
 
         wind_sigma, obs_noise_std = _resolve_noise(args)
         ts_parts = [int(x) for x in str(args.timesteps).split(",")]
-        tasks = ["pursuit_linear", "pursuit_evasive", "search_pursuit", "dogfight"]
+        tasks = [
+            "hover",
+            "pursuit_linear",
+            "pursuit_evasive",
+            "search_pursuit",
+            "dogfight",
+        ]
         while len(ts_parts) < len(tasks):
             ts_parts.append(ts_parts[-1])
         stages = [{"task": t, "timesteps": s} for t, s in zip(tasks, ts_parts)]

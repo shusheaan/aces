@@ -275,7 +275,7 @@ def test_env_task_default_is_dogfight():
 def test_env_task_reward_overrides():
     """pursuit_linear overrides approach_reward."""
     env = DroneDogfightEnv(task="pursuit_linear", max_episode_steps=5)
-    assert env._reward_cfg["approach_reward"] == 0.2
+    assert env._reward_cfg["approach_reward"] == 5.0
     assert env._reward_cfg["info_gain_reward"] == 0.0
 
 

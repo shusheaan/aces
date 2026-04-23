@@ -73,12 +73,15 @@ class DroneDogfightEnv(gym.Env):
         # Task-specific reward overrides
         _TASK_REWARD_OVERRIDES = {
             "pursuit_linear": {
-                "approach_reward": 0.2,
+                "approach_reward": 5.0,
                 "info_gain_reward": 0.0,
                 "lost_contact_penalty": 0.0,
             },
-            "pursuit_evasive": {},
+            "pursuit_evasive": {
+                "approach_reward": 3.0,
+            },
             "search_pursuit": {
+                "approach_reward": 3.0,
                 "info_gain_reward": 0.1,
                 "lost_contact_penalty": 0.02,
             },
@@ -502,24 +505,52 @@ class DroneDogfightEnv(gym.Env):
         return list(action)
 
     def _trajectory_action(self) -> list[float]:
-        """PD controller tracking the current trajectory waypoint."""
+        """PD controller tracking the current trajectory waypoint.
+
+        Uses a simplified attitude-based approach: desired lateral
+        acceleration maps to desired roll/pitch, which maps to
+        differential motor thrusts via X-configuration mixing.
+        """
         target = self._traj_fn(t=self._step_count * self._dt_ctrl)  # type: ignore[misc]
         state_b = self._sim.drone_b_state()
         pos = np.array(state_b[:3], dtype=np.float64)
         vel = np.array(state_b[3:6], dtype=np.float64)
 
         error = target - pos
-        kp, kd = 2.0, 1.0
+        # Softer gains to prevent runaway oscillations
+        kp, kd = 1.0, 0.8
         accel_cmd = kp * error - kd * vel
+
+        # Clamp lateral acceleration to prevent flips
+        lat_mag = float(np.linalg.norm(accel_cmd[:2]))
+        max_lat = 3.0  # m/s^2 — limits tilt to ~17 degrees
+        if lat_mag > max_lat:
+            accel_cmd[:2] *= max_lat / lat_mag
+
         hover = self._hover_thrust
 
-        thrust = hover + (accel_cmd[2] * self._mass / 4.0)
-        lateral_mag = float(np.linalg.norm(accel_cmd[:2])) * self._mass * 0.25
+        # Altitude: collective thrust delta shared across all motors
+        dz = accel_cmd[2] * self._mass / 4.0
+
+        # Lateral: map desired (ax, ay) to roll/pitch motor differentials
+        # X-config: motor layout is front-left(0), front-right(1),
+        #           rear-left(2), rear-right(3)
+        # Desired pitch (forward = +x) → motors 2,3 up, 0,1 down
+        # Desired roll (right = +y) → motors 0,2 up, 1,3 down
+        scale = self._mass * 0.15  # conservative torque authority
+        pitch_diff = float(accel_cmd[0]) * scale
+        roll_diff = float(accel_cmd[1]) * scale
+
+        base = hover + dz
+        # X-config mixing: tau_x = d*s*(FL - FR - RL + RR)
+        #                   tau_y = d*s*(FL + FR - RL - RR)
+        # For +roll (right): FL+RR up, FR+RL down → roll_diff positive on FL,RR
+        # For +pitch (forward): FL+FR down, RL+RR up → pitch_diff positive on RL,RR
         motors = [
-            max(0.0, min(self._max_thrust, thrust + lateral_mag)),
-            max(0.0, min(self._max_thrust, thrust + lateral_mag)),
-            max(0.0, min(self._max_thrust, thrust - lateral_mag)),
-            max(0.0, min(self._max_thrust, thrust - lateral_mag)),
+            max(0.0, min(self._max_thrust, base - pitch_diff + roll_diff)),  # FL
+            max(0.0, min(self._max_thrust, base - pitch_diff - roll_diff)),  # FR
+            max(0.0, min(self._max_thrust, base + pitch_diff - roll_diff)),  # RL
+            max(0.0, min(self._max_thrust, base + pitch_diff + roll_diff)),  # RR
         ]
         return motors
 
@@ -760,20 +791,21 @@ class DroneDogfightEnv(gym.Env):
         # Terminal conditions (agent collision / OOB)
         if result.drone_a_collision or result.drone_a_oob:
             if self._task == "hover":
-                reward = -10.0
+                reward = float(rcfg["collision_penalty"])
             else:
                 reward = float(rcfg["collision_penalty"])
             terminated = True
         elif self._task == "hover":
-            # Hover task reward: penalise angular velocity, position drift, control
-            # and give small survival bonus
+            # Hover task reward: survival-dominant with small shaping penalties.
+            # The survival bonus must exceed worst-case shaping so the agent
+            # prefers hovering imperfectly over crashing early.
             pos_drift = float(np.linalg.norm(own_state_arr[:3] - self._hover_spawn_pos))
             motors_arr = np.array(motors_a, dtype=np.float64)
             hover_arr = np.full(4, self._hover_thrust, dtype=np.float64)
             ctrl_cost = float(np.sum((motors_arr - hover_arr) ** 2))
-            reward = (
-                -ang_vel_norm - pos_drift - 0.01 * ctrl_cost + 0.01  # survival bonus
-            )
+            # Clamp shaping penalties so survival bonus always dominates
+            shaping = min(0.1 * ang_vel_norm + 0.1 * pos_drift + 0.001 * ctrl_cost, 0.8)
+            reward = 1.0 - shaping  # net reward is always positive when hovering
         # Opponent kills agent
         elif result.kill_b:
             reward = float(rcfg["killed_penalty"])
@@ -782,9 +814,12 @@ class DroneDogfightEnv(gym.Env):
         elif result.kill_a:
             reward = float(rcfg["kill_reward"])
             terminated = True
-        # Opponent crashes
+        # Opponent crashes — in pursuit tasks, don't reward free crashes
         elif result.drone_b_collision or result.drone_b_oob:
-            reward = float(rcfg["kill_reward"]) * 0.5
+            if self._task in ("pursuit_linear", "pursuit_evasive", "search_pursuit"):
+                reward = 0.0
+            else:
+                reward = float(rcfg["kill_reward"]) * 0.5
             terminated = True
         else:
             # Shaping rewards
