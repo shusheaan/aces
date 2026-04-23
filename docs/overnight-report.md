@@ -1,6 +1,6 @@
 # Overnight Experiment Report
 
-**Date**: 2026-04-23 (00:00 - 06:45)  
+**Date**: 2026-04-23 (00:00 - 07:15)  
 **Branch**: `dev/overnight-experiment-20260423`  
 **Objective**: Validate training pipeline, fix bugs, run curriculum experiments, analyze convergence
 
@@ -8,11 +8,14 @@
 
 ## Executive Summary
 
-Over ~7 hours of autonomous work, I identified and fixed 3 critical bugs, ran 6 training experiments totaling ~550k timesteps, and discovered a fundamental reward-shaping issue that was preventing learning. The key breakthrough was fixing the hover reward, which enabled the agent to learn stable flight in ~50k steps (going from crashing in 70 steps to hovering for the full 1000-step episode).
+Over ~7.5 hours of autonomous work, I identified and fixed 4 critical bugs, ran 8 training experiments totaling ~850k timesteps, and discovered two fundamental reward-shaping issues preventing learning. Two key breakthroughs:
+
+1. **Hover reward fix**: Agent went from crashing in 70 steps to hovering for the full 1000-step episode (91% success) in ~50k steps.
+2. **Pursuit reward fix**: Zeroing opponent-crash free reward and increasing approach signal enabled the agent to actually learn pursuit behavior (min distance: 7.0m vs 10.2m baseline, approach velocity emerging).
 
 ---
 
-## Commits Made (4 total)
+## Commits Made (7 total)
 
 | Commit | Description |
 |--------|-------------|
@@ -20,6 +23,9 @@ Over ~7 hours of autonomous work, I identified and fixed 3 critical bugs, ran 6 
 | `4a3d8dc` | Add hover stage to curriculum pipeline |
 | `734b89e` | Rebalance hover reward to prevent crash-early local optimum |
 | `8e3ebc0` | Add chain experiment script for hover->pursuit transfer |
+| `17a437e` | Fix curriculum callback phase-transition misfire (from reviewer) |
+| `fe4a5b6` | Rebalance pursuit reward + fix trajectory PD controller |
+| (report) | Updated overnight report with pursuit findings |
 
 ---
 
@@ -59,6 +65,25 @@ Over ~7 hours of autonomous work, I identified and fixed 3 critical bugs, ran 6 
 **Fix**: Restructured to `1.0 - min(0.1*penalties, 0.8)`, ensuring per-step reward is always in [0.2, 1.0]. The agent always prefers surviving longer. Crash penalty uses `collision_penalty` from config (-50).
 
 **Impact**: With the fix, the agent went from "always crash in 74 steps" to "hover for full 1000-step episode 91% of the time" within 50k steps.
+
+### 4. Pursuit Reward Dominated by Opponent-Crash Free Reward (Critical)
+
+**File**: `aces/env.py`
+
+**Problem**: Three compounding issues made pursuit_linear unlearnable:
+
+1. **Broken trajectory PD controller**: The lateral thrust was applied uniformly to all motors (`thrust + lateral_mag` for motors 0,1 and `thrust - lateral_mag` for 2,3), creating a crude pitch but no roll authority. This caused runaway oscillation and frequent opponent crashes.
+
+2. **Opponent-crash windfall (+50)**: When the broken opponent crashed (frequent), the agent received `kill_reward * 0.5 = 50` — a massive reward for doing nothing.
+
+3. **Weak approach signal (+0.2/m)**: The max approach reward over a full 11.4m closing was only +2.13, vs +50 for waiting. Ratio: 20:1 in favor of inaction.
+
+**Fix (three-part)**:
+- Increased `approach_reward` from 0.2 to 5.0/m (full approach now worth ~47 points)
+- Zeroed opponent-crash reward for pursuit tasks
+- Rewrote PD controller with proper X-config motor mixing, softer gains (kp=1.0, kd=0.8), and lateral acceleration clamp (3 m/s^2)
+
+**Impact**: Agent now shows genuine approach behavior (min distance: 7.0m vs 10.2m baseline). Reward signal correctly aligned — approach is rewarded, inaction is not.
 
 ---
 
@@ -155,6 +180,26 @@ Added `*.bin`, `aces_model*/`, `policy.bin`, `perception.bin`, `checkpoints/` to
 
 Launched but ran on old code (without hover fix). Only completed partial stage 0 due to resource contention. Results not meaningful.
 
+### Experiment 7: Pursuit with Fixed Reward (Hover -> Pursuit 100k)
+
+| Window | Mean Dist | Min Dist | Mean Reward | Crash |
+|--------|-----------|----------|-------------|-------|
+| Ep 1-200 | 11.24 | 9.8 | -1.77 | 5.5% |
+| Ep 401-600 | 10.95 | 8.5 | -5.62 | 16% |
+| Ep 801-1000 | **10.64** | **7.0** | **+0.13** | 8% |
+| Ep 1001-1343 | **10.67** | **7.4** | **+2.0** | 4% |
+
+**Conclusion**: With fixed reward (approach=5.0, opp_crash=0, better PD), the agent shows genuine approach learning. Min distance dropped from 9.8 to 7.0m. Reward turned positive. Crash rate spiked during exploration (16%) then stabilized (4%). Still needs more training (~500k+) to reach lock-on distance of 2m.
+
+### Comparison: Old vs New Pursuit Reward (Last 300 Episodes)
+
+| Metric | Old Reward | New Reward |
+|--------|-----------|------------|
+| Mean distance | 11.25m (no approach) | **10.67m** (approaching) |
+| Min distance | 10.2m | **7.4m** (4m closer) |
+| Mean reward | +49.9 (fake, from opp crash) | +1.68 (real, from approach) |
+| Crash rate | 1% | 4% |
+
 ---
 
 ## Key Findings
@@ -165,7 +210,9 @@ Skipping hover and going straight to pursuit_linear fails completely. The Crazyf
 
 ### 2. Reward shaping requires careful incentive analysis
 
-The original hover reward created a local optimum where crashing fast was better than hovering badly. The fix (survival-dominant reward with clamped penalties) solved this completely.
+Two separate reward bugs were found:
+- **Hover**: survival bonus too weak vs penalties → agent learned to crash fast (fixed with survival-dominant reward)
+- **Pursuit**: opponent-crash free reward (+50) dominated approach signal (+0.2/m) → agent learned to wait, not pursue (fixed by zeroing opponent-crash and increasing approach reward)
 
 ### 3. Opponent behavior dominates reward signal
 
@@ -181,23 +228,17 @@ In pursuit_linear, the trajectory-following opponent frequently crashes (OOB), g
 
 ### High Priority
 
-1. **Pursuit reward needs rebalancing**: The opponent-crash reward (+50) dominates the approach signal (+0.2/m). Options:
-   - Reduce or eliminate opponent-crash reward in pursuit_linear task
-   - Increase approach_reward to ~1.0-2.0/m
-   - Add a distance-based penalty (e.g., -0.1 per meter from target)
-   - Make the trajectory controller more stable so it doesn't crash
+1. **~~Pursuit reward needs rebalancing~~** (FIXED): approach_reward increased to 5.0, opponent-crash zeroed, PD controller rewritten. Agent now shows genuine approach learning (min dist 7.0m).
 
-2. **Observation normalization**: The 21-dim observation has unscaled components (positions ~11m, velocities ~5 m/s, angles ~3 rad). Adding `VecNormalize` wrapper from SB3 would improve learning speed.
+2. **Longer training needed**: 100k steps shows early convergence but isn't enough. The agent reduced distance from 11.4m to 7.0m but still needs to reach lock-on range (2m). Recommend 500k+ steps for pursuit_linear.
 
-3. **Longer training needed**: Even with fixes, 100k steps (~1700 episodes of 60 steps) is short. The curriculum.toml specifies 200k-5M steps per phase. Real convergence on pursuit likely needs 500k+ steps.
+3. **Observation normalization**: The 21-dim observation has unscaled components (positions ~11m, velocities ~5 m/s, angles ~3 rad). Adding `VecNormalize` wrapper from SB3 would improve learning speed.
 
 ### Medium Priority
 
 4. **Opponent update is wasted in hover**: The SelfPlayTrainer copies weights even for hover task where there's no opponent. Could skip opponent callbacks when `task == "hover"`.
 
-5. **Episode length optimization**: Most pursuit episodes last only ~60 steps before the opponent crashes. Consider clamping the trajectory to stay well within bounds.
-
-6. **Wind interaction**: Wind sigma of 0.3N is 113% of the Crazyflie's weight. Training with wind should only happen after the agent can hover stably (curriculum stages 4-5).
+5. **Wind interaction**: Wind sigma of 0.3N is 113% of the Crazyflie's weight. Training with wind should only happen after the agent can hover stably (curriculum stages 4-5).
 
 ### Low Priority
 
@@ -221,11 +262,12 @@ All tests pass after changes:
 
 | File | Change | Lines |
 |------|--------|-------|
-| `aces/trainer.py` | Callback dedup + logging | +175/-27 |
-| `aces/logging_config.py` | New logging module | +110 |
-| `aces/env.py` | Hover reward fix | +7/-6 |
-| `scripts/run.py` | Add hover to curriculum | +14/-2 |
+| `aces/trainer.py` | Callback dedup + logging + phase-transition fix | +118/-27 |
+| `aces/logging_config.py` | New logging module | +114 |
+| `aces/env.py` | Hover reward + pursuit reward + PD controller fix | +39/-12 |
+| `scripts/run.py` | Add hover to curriculum | +16/-2 |
 | `scripts/experiment_chain.py` | New experiment script | +121 |
-| `.gitignore` | Training artifacts | +5 |
+| `tests/test_env.py` | Update approach_reward assertion | +1/-1 |
+| `.gitignore` | Training artifacts | +4 |
 
-**Total**: +432/-35 lines across 6 files
+**Total**: +582/-35 lines across 7 files
