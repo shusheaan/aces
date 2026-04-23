@@ -40,6 +40,9 @@ use crate::f32_sdf::{ArenaF32, ObstacleF32};
 /// changes — just more VRAM for an unused tail.
 pub const MAX_OBSTACLES: usize = 32;
 
+/// Dimensionality of the 13-element drone state (pos3 + vel3 + quat4 + angvel3).
+const STATE_DIM: usize = 13;
+
 /// Drone physical parameters, GPU-compatible layout.
 ///
 /// `repr(C)` so it can be bound as a WGSL `uniform` struct. Exactly 48 bytes.
@@ -298,8 +301,8 @@ impl GpuBatchMppi {
 
         // Sizes in bytes. All element widths are 4 bytes (f32 or u32).
         const F: u64 = 4;
-        let states_size = (n_drones * 13) as u64 * F;
-        let enemies_size = (n_drones * 13) as u64 * F;
+        let states_size = (n_drones * STATE_DIM) as u64 * F;
+        let enemies_size = (n_drones * STATE_DIM) as u64 * F;
         let mean_ctrls_size = (n_drones * horizon * 4) as u64 * F;
         let noise_size = (n_drones * n_samples * horizon * 4) as u64 * F;
         let costs_size = (n_drones * n_samples) as u64 * F;
@@ -313,6 +316,7 @@ impl GpuBatchMppi {
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST;
         let uniform_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
+        // obstacles are uploaded once and only read by the shader — no COPY_SRC needed
         let obstacles_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
 
         let make_buf =
@@ -335,6 +339,7 @@ impl GpuBatchMppi {
 
         let params_uniform = make_buf("mppi.params", params_uniform_size, uniform_usage);
         let weights_uniform = make_buf("mppi.weights", weights_uniform_size, uniform_usage);
+        // obstacles are uploaded once and only read by the shader — no COPY_SRC needed
         let obstacles_buffer = make_buf("mppi.obstacles", obstacles_size, obstacles_usage);
 
         // Upload static uniforms

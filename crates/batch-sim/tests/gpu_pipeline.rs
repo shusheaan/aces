@@ -83,35 +83,29 @@ fn test_pipeline_buffer_sizes() {
     let pipeline = GpuBatchMppi::new(n_drones, n_samples, horizon, &params, weights, &arena)
         .expect("pipeline construction");
 
-    // 4 bytes per element (f32 or u32)
-    assert_eq!(pipeline.states_buffer.size(), (n_drones * 13 * 4) as u64);
-    assert_eq!(pipeline.enemies_buffer.size(), (n_drones * 13 * 4) as u64);
-    assert_eq!(
-        pipeline.mean_ctrls_buffer.size(),
-        (n_drones * horizon * 4 * 4) as u64
-    );
-    assert_eq!(
-        pipeline.noise_buffer.size(),
-        (n_drones * n_samples * horizon * 4 * 4) as u64
-    );
-    assert_eq!(
-        pipeline.costs_buffer.size(),
-        (n_drones * n_samples * 4) as u64
-    );
-    assert_eq!(
-        pipeline.ctrls_out_buffer.size(),
-        (n_drones * n_samples * horizon * 4 * 4) as u64
-    );
-    assert_eq!(
-        pipeline.result_buffer.size(),
-        (n_drones * horizon * 4 * 4) as u64
-    );
+    // Literal expected sizes (bytes). 4 bytes/element (f32 or u32).
+    // Derivation with n_drones=8, n_samples=64, horizon=20:
+    //   states:          n_drones * 13 * 4                       = 8 * 13 * 4               = 416
+    //   enemies:         n_drones * 13 * 4                       = 8 * 13 * 4               = 416
+    //   mean_ctrls:      n_drones * horizon * 4 * 4              = 8 * 20 * 4 * 4           = 2560
+    //   noise:           n_drones * n_samples * horizon * 4 * 4  = 8 * 64 * 20 * 4 * 4      = 163840
+    //   costs:           n_drones * n_samples * 4                = 8 * 64 * 4               = 2048
+    //   ctrls_out:       n_drones * n_samples * horizon * 4 * 4  = 8 * 64 * 20 * 4 * 4      = 163840
+    //   result:          n_drones * horizon * 4 * 4              = 8 * 20 * 4 * 4           = 2560
+    //   params_uniform:  size_of::<DroneParamsGpu>()             = 48
+    //   weights_uniform: size_of::<CostWeightsGpu>()             = 48
+    //   obstacles:       MAX_OBSTACLES * size_of::<ObstacleGpu>()= 32 * 48                  = 1536
+    // Updating dims? Recompute the numbers above to match.
+    assert_eq!(pipeline.states_buffer.size(), 416);
+    assert_eq!(pipeline.enemies_buffer.size(), 416);
+    assert_eq!(pipeline.mean_ctrls_buffer.size(), 2560);
+    assert_eq!(pipeline.noise_buffer.size(), 163840);
+    assert_eq!(pipeline.costs_buffer.size(), 2048);
+    assert_eq!(pipeline.ctrls_out_buffer.size(), 163840);
+    assert_eq!(pipeline.result_buffer.size(), 2560);
     assert_eq!(pipeline.params_uniform.size(), 48);
     assert_eq!(pipeline.weights_uniform.size(), 48);
-    assert_eq!(
-        pipeline.obstacles_buffer.size(),
-        (MAX_OBSTACLES * 48) as u64
-    );
+    assert_eq!(pipeline.obstacles_buffer.size(), 1536);
 }
 
 #[test]
@@ -177,6 +171,7 @@ fn test_obstacle_gpu_conversion() {
     assert_eq!(gpu_sphere.kind, 1);
     assert_eq!(gpu_sphere.center, [4.0, 5.0, 6.0]);
     assert_eq!(gpu_sphere.param_a, 0.7);
+    assert_eq!(gpu_sphere.param_b, 0.0);
 
     // Cylinder
     let cyl_obs = ObstacleF32::Cylinder {
