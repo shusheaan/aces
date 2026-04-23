@@ -197,17 +197,29 @@ V2 uses the corrected roll-axis motor mixing (reviewer-identified bug fix). The 
 
 **Result**: Mean dist 11.45m, min dist 10.2m — less approach than v1. This confirms the v1 approach learning was partly from exploiting the opponent's erratic behavior, not genuine pursuit skill.
 
+### Experiment 9: Pursuit 200k with Fixed PD + Corrected Motor Mixing
+
+| Window | Mean Dist | Min Dist | Reward | Crash |
+|--------|-----------|----------|--------|-------|
+| Ep 1-610 | 11.64 | 10.4 | -2.30 | 3.0% |
+| Ep 611-1220 | 11.35 | 10.3 | -0.55 | 2.0% |
+| Ep 1221-1830 | 11.13 | 10.0 | +0.78 | 1.8% |
+| Ep 1831-2440 | 11.00 | 10.0 | +0.64 | 2.8% |
+| Ep 2441-3050 | **10.93** | **9.8** | **+1.74** | 1.5% |
+
+**Conclusion**: Monotonic improvement over 200k steps. Agent closed 0.76m (11.69→10.93) with min dist 9.8m. Reward consistently positive in last half. Still 7.8m from lock-on distance — extrapolation suggests ~2M steps needed for full convergence.
+
 ### All Pursuit Experiments Summary (Last 300 Episodes)
 
 | Experiment | Crash | Mean Dist | Min Dist | Reward |
 |-----------|-------|-----------|----------|--------|
 | Baseline (no hover, old reward) | 37% | 11.51 | 10.5 | +13.2 (fake) |
 | V0 (hover, old reward) | 1% | 11.25 | 10.2 | +49.9 (fake) |
-| V1 (broken PD, new reward) | 4% | **10.67** | **7.4** | +1.68 |
-| V2 (fixed PD, new reward) | 2% | 11.45 | 10.2 | -0.86 |
+| V1 (broken PD, new reward, 100k) | 4% | 10.67 | 7.4 | +1.68 |
+| V2 (fixed PD, new reward, 100k) | 2% | 11.45 | 10.2 | -0.86 |
+| **V3 (fixed PD, 200k)** | **1.5%** | **10.93** | **9.8** | **+1.74** |
 
-**Key insight**: The fixed PD opponent is genuinely stable, making pursuit harder. 100k steps is insufficient — the curriculum.toml specifies 200k for this stage. The reward and PD fixes are correct; the agent simply needs more training time.
-| Crash rate | 1% | 4% |
+**Key insight**: With correct rewards and PD, the agent learns genuine approach behavior but slowly. 200k steps yields 0.76m improvement. Full convergence to lock-on range (2m) likely needs 1-2M steps, consistent with the curriculum.toml spec of 200k-2M per stage.
 
 ---
 
