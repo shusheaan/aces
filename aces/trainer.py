@@ -427,10 +427,18 @@ class SelfPlayTrainer:
             fpv=fpv,
         )
 
+        # Wrap with VecNormalize for observation normalization
+        from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+        vec_env = DummyVecEnv([lambda: self.env])
+        self._vec_env = VecNormalize(
+            vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0
+        )
+
         policy, policy_kwargs = self._resolve_policy()
         self.model = PPO(
             policy,
-            self.env,
+            self._vec_env,
             learning_rate=_learning_rate,
             n_steps=_n_steps,
             batch_size=_batch_size,
@@ -462,6 +470,7 @@ class SelfPlayTrainer:
         kwargs = {"verbose": 0}
         if policy_kwargs:
             kwargs["policy_kwargs"] = policy_kwargs
+        # Opponent uses the raw env (not normalized) for its own PPO instance
         self._opponent_model = PPO(policy, self.env, **kwargs)
         opponent_model = self._opponent_model
 
@@ -511,9 +520,11 @@ class SelfPlayTrainer:
 
     def save(self, path: str = "aces_model"):
         self.model.save(path)
+        if hasattr(self, "_vec_env"):
+            self._vec_env.save(path + "_vecnorm.pkl")
 
     def load(self, path: str = "aces_model"):
-        self.model = PPO.load(path, env=self.env)
+        self.model = PPO.load(path, env=self._vec_env)
         self._setup_opponent()
 
 
@@ -713,6 +724,11 @@ class CurriculumTrainer:
 
             vec_env = BatchedOpponentVecEnv(vec_env)
 
+        # Normalize observations and rewards for stable learning
+        from stable_baselines3.common.vec_env import VecNormalize
+
+        vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
         return vec_env
 
     def _resolve_policy(self) -> tuple[str, dict | None]:
@@ -753,12 +769,20 @@ class CurriculumTrainer:
 
             logger.info("=== Phase %d -- %s (%d steps) ===", i, phase.name, timesteps)
 
-            # Create env: use VecEnv when n_envs is set, single env otherwise
+            # Create env with VecNormalize wrapping
             if self._n_envs > 1:
                 env = self._make_vec_env(phase)
             else:
-                env = self._make_env(
+                from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+                raw_env = self._make_env(
                     task, opponent=getattr(phase, "opponent", "random"), phase=phase
+                )
+                env = VecNormalize(
+                    DummyVecEnv([lambda: raw_env]),
+                    norm_obs=True,
+                    norm_reward=True,
+                    clip_obs=10.0,
                 )
 
             if self.model is None:
