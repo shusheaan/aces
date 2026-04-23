@@ -66,3 +66,36 @@ def test_train_on_synthetic_data_converges() -> None:
 
     final_loss = train_perception_on_data(obs, continuous, intent, epochs=30, lr=1e-3)
     assert final_loss < 0.5
+
+
+def test_train_and_evaluate_returns_model_and_metrics() -> None:
+    """train_and_evaluate returns a working model and metric dict."""
+    from aces.perception import train_and_evaluate
+
+    rng = np.random.default_rng(42)
+    n = 500
+    obs = rng.standard_normal((n, 21)).astype(np.float32)
+    continuous = np.column_stack(
+        [
+            1.0 / (1.0 + np.exp(-obs[:, 0])),
+            1.0 / (1.0 + np.exp(-obs[:, 1])),
+            1.0 / (1.0 + np.exp(-obs[:, 2])),
+            1.0 / (1.0 + np.exp(-obs[:, 3])),
+            np.abs(obs[:, 4]) * 5.0,
+        ]
+    ).astype(np.float32)
+    intent = (obs[:, 5] > 0.3).astype(np.int64)
+    intent[obs[:, 5] < -0.3] = 1
+
+    net, metrics = train_and_evaluate(obs, continuous, intent, epochs=10, val_split=0.2)
+
+    # Model should be usable
+    test_obs = torch.randn(1, 21)
+    cont_out, intent_out = net(test_obs)
+    assert cont_out.shape == (1, 5)
+
+    # Metrics should have expected keys
+    assert "train_loss" in metrics
+    assert "val_mse" in metrics
+    assert "val_intent_accuracy" in metrics
+    assert metrics["val_intent_accuracy"] >= 0.0

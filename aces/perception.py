@@ -99,6 +99,72 @@ def train_perception_on_data(
     return final_loss
 
 
+def train_and_evaluate(
+    obs: np.ndarray,
+    continuous_labels: np.ndarray,
+    intent_labels: np.ndarray,
+    epochs: int = 50,
+    lr: float = 1e-3,
+    batch_size: int = 256,
+    val_split: float = 0.2,
+) -> tuple[PerceptionNet, dict[str, float]]:
+    """Train PerceptionNet with train/val split. Returns (model, metrics).
+
+    Metrics dict contains: train_loss, val_mse, val_intent_accuracy.
+    """
+    n = len(obs)
+    n_val = int(n * val_split)
+    n_train = n - n_val
+    perm = np.random.default_rng(42).permutation(n)
+    train_idx, val_idx = perm[:n_train], perm[n_train:]
+
+    device = torch.device("cpu")
+    net = PerceptionNet().to(device)
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+
+    obs_t = torch.as_tensor(obs[train_idx], dtype=torch.float32, device=device)
+    cont_t = torch.as_tensor(
+        continuous_labels[train_idx], dtype=torch.float32, device=device
+    )
+    intent_t = torch.as_tensor(
+        intent_labels[train_idx], dtype=torch.long, device=device
+    )
+
+    dataset = TensorDataset(obs_t, cont_t, intent_t)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    final_loss = 0.0
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for batch_obs, batch_cont, batch_intent in loader:
+            pred_cont, pred_intent_logits = net(batch_obs)
+            loss = F.mse_loss(pred_cont, batch_cont) + 0.5 * F.cross_entropy(
+                pred_intent_logits, batch_intent
+            )
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        final_loss = epoch_loss / len(loader)
+
+    # Validation
+    net.eval()
+    with torch.no_grad():
+        val_obs = torch.as_tensor(obs[val_idx], dtype=torch.float32)
+        val_cont = torch.as_tensor(continuous_labels[val_idx], dtype=torch.float32)
+        val_intent = torch.as_tensor(intent_labels[val_idx], dtype=torch.long)
+        pred_cont, pred_intent_logits = net(val_obs)
+        val_mse = F.mse_loss(pred_cont, val_cont).item()
+        pred_classes = pred_intent_logits.argmax(dim=1)
+        val_acc = (pred_classes == val_intent).float().mean().item()
+
+    return net, {
+        "train_loss": final_loss,
+        "val_mse": val_mse,
+        "val_intent_accuracy": val_acc,
+    }
+
+
 def export_perception(net: PerceptionNet, path: str) -> None:
     """Export PerceptionNet weights to binary (same format as policy.bin).
 
