@@ -14,3 +14,4 @@ aces_model*/
 /policy.bin
 /perception.bin
 checkpoints/
+.worktrees/
