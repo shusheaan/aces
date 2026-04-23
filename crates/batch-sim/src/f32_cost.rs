@@ -20,7 +20,7 @@ use aces_mppi::cost::CostWeights;
 use nalgebra::Vector4;
 
 /// Cost function weights for the MPPI controller (f32 port of `CostWeights`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CostWeightsF32 {
     /// Weight for distance to opponent
     pub w_dist: f32,
@@ -535,6 +535,7 @@ mod tests {
         let weights_f32 = CostWeightsF32::from_f64(&weights_f64);
         let mut rng = SmallRng::seed_from_u64(17);
 
+        let mut close_hits = 0usize;
         for i in 0..50 {
             // Anchor self in open space, place enemy within 2.5m on a random
             // unit-sphere direction.
@@ -564,10 +565,13 @@ mod tests {
 
             let self_f64 = build_state(self_pos, self_att);
             let enemy_f64 = build_state(enemy_pos, enemy_att);
+            // The arena clip above can push the enemy beyond 3m, so count how
+            // many samples truly exercise the `dist < 3.0` close-range branch
+            // and assert an adequate coverage floor after the loop.
             let actual_dist = self_f64.distance_to(&enemy_f64);
-            // Accept the sample even if post-clip dist ≥ 3; branch-coverage
-            // guarantee below.
-            let _ = actual_dist;
+            if actual_dist < 3.0 {
+                close_hits += 1;
+            }
 
             let self_f32 = DroneStateF32::from_f64(&self_f64);
             let enemy_f32 = DroneStateF32::from_f64(&enemy_f64);
@@ -596,6 +600,14 @@ mod tests {
                 &format!("evasion close-proximity #{i}"),
             );
         }
+        // Branch-coverage guarantee: the close-range `dist < 3.0` branch must
+        // fire on at least 30 of 50 samples. If this fails, the test is no
+        // longer exercising the branch it claims to cover.
+        assert!(
+            close_hits >= 30,
+            "close-proximity branch fired on only {close_hits}/50 samples (need >= 30); \
+             test is not exercising the dist<3.0 branch — redesign the sampler"
+        );
     }
 
     #[test]
