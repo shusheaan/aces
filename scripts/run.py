@@ -244,7 +244,13 @@ def main():
     parser.add_argument(
         "--task",
         default="dogfight",
-        choices=["pursuit_linear", "pursuit_evasive", "search_pursuit", "dogfight"],
+        choices=[
+            "hover",
+            "pursuit_linear",
+            "pursuit_evasive",
+            "search_pursuit",
+            "dogfight",
+        ],
         help="Curriculum task / difficulty stage",
     )
     parser.add_argument("--save-path", default="aces_model")
@@ -295,7 +301,13 @@ def main():
 
         wind_sigma, obs_noise_std = _resolve_noise(args)
         ts_parts = [int(x) for x in str(args.timesteps).split(",")]
-        tasks = ["pursuit_linear", "pursuit_evasive", "search_pursuit", "dogfight"]
+        tasks = [
+            "hover",
+            "pursuit_linear",
+            "pursuit_evasive",
+            "search_pursuit",
+            "dogfight",
+        ]
         while len(ts_parts) < len(tasks):
             ts_parts.append(ts_parts[-1])
         stages = [{"task": t, "timesteps": s} for t, s in zip(tasks, ts_parts)]
