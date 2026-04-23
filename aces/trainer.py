@@ -250,6 +250,103 @@ class TensorBoardMetricsCallback(BaseCallback):
         return True
 
 
+class WindowSummaryCallback(BaseCallback):
+    """Prints convergence diagnostics every ``interval`` steps.
+
+    Compares the current window to the previous window so you can see
+    at a glance whether training is converging during a long run.
+    """
+
+    def __init__(self, interval: int = 10_000, verbose: int = 0):
+        super().__init__(verbose)
+        self._interval = interval
+        self._last_window: int = 0
+        self._ep_rewards: list[float] = []
+        self._ep_distances: list[float] = []
+        self._ep_crashes: int = 0
+        self._ep_kills: int = 0
+        self._ep_timeouts: int = 0
+        self._ep_count: int = 0
+        self._ep_current_reward: float = 0.0
+        # Previous window stats for comparison
+        self._prev_dist: float | None = None
+        self._prev_reward: float | None = None
+        self._prev_crash_rate: float | None = None
+
+    def _on_training_start(self) -> None:
+        self._last_window = self.num_timesteps // self._interval
+
+    def _on_step(self) -> bool:
+        rewards = self.locals.get("rewards", [0.0])
+        self._ep_current_reward += float(rewards[0])
+
+        for info in self.locals.get("infos", []):
+            if info.get("kill_a", False):
+                self._ep_kills += 1
+
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [{}])
+        if dones[0]:
+            self._ep_count += 1
+            self._ep_rewards.append(self._ep_current_reward)
+            self._ep_current_reward = 0.0
+            info = infos[0] if infos else {}
+            self._ep_distances.append(info.get("distance", 0.0))
+            if info.get("collision", False):
+                self._ep_crashes += 1
+            if info.get("truncated", False):
+                self._ep_timeouts += 1
+
+        window = self.num_timesteps // self._interval
+        if window > self._last_window and self._ep_count > 0:
+            self._last_window = window
+            n = max(self._ep_count, 1)
+            mean_r = float(np.mean(self._ep_rewards)) if self._ep_rewards else 0.0
+            mean_d = float(np.mean(self._ep_distances)) if self._ep_distances else 0.0
+            min_d = float(np.min(self._ep_distances)) if self._ep_distances else 0.0
+            crash_pct = self._ep_crashes / n * 100
+
+            # Delta vs previous window
+            dr = (
+                f" ({mean_r - self._prev_reward:+.1f})"
+                if self._prev_reward is not None
+                else ""
+            )
+            dd = (
+                f" ({mean_d - self._prev_dist:+.1f}m)"
+                if self._prev_dist is not None
+                else ""
+            )
+
+            logger.info(
+                "[%dk] %d eps | reward=%.1f%s | dist=%.1f%s (min=%.1f) | crash=%.0f%% | kill=%d | timeout=%d",
+                self.num_timesteps // 1000,
+                n,
+                mean_r,
+                dr,
+                mean_d,
+                dd,
+                min_d,
+                crash_pct,
+                self._ep_kills,
+                self._ep_timeouts,
+            )
+
+            self._prev_dist = mean_d
+            self._prev_reward = mean_r
+            self._prev_crash_rate = crash_pct
+
+            # Reset window counters
+            self._ep_rewards.clear()
+            self._ep_distances.clear()
+            self._ep_crashes = 0
+            self._ep_kills = 0
+            self._ep_timeouts = 0
+            self._ep_count = 0
+
+        return True
+
+
 class EpisodeLoggerCallback(BaseCallback):
     """Writes per-episode stats to CSV for offline analysis.
 
@@ -499,6 +596,7 @@ class SelfPlayTrainer:
         state_cb = StateCallback(state_callback=self.state_callback)
         stats_cb = TrainingStatsCallback()
         logger_cb = EpisodeLoggerCallback(log_dir=str(log_dir), verbose=1)
+        window_cb = WindowSummaryCallback(interval=10_000)
 
         logger.info(
             "Training started: %d timesteps, task=%s, fpv=%s",
@@ -510,7 +608,7 @@ class SelfPlayTrainer:
 
         self.model.learn(
             total_timesteps=self.total_timesteps,
-            callback=[opp_cb, state_cb, stats_cb, logger_cb],
+            callback=[opp_cb, state_cb, stats_cb, logger_cb, window_cb],
         )
         self.opponent_update_count = opp_cb.update_count
         self.stats = stats_cb.summary()
@@ -804,7 +902,8 @@ class CurriculumTrainer:
             stats_cb = TrainingStatsCallback()
             logger_cb = EpisodeLoggerCallback(log_dir=str(stage_log), verbose=1)
             tb_cb = TensorBoardMetricsCallback()
-            callbacks: list[BaseCallback] = [stats_cb, logger_cb, tb_cb]
+            window_cb = WindowSummaryCallback(interval=10_000)
+            callbacks: list[BaseCallback] = [stats_cb, logger_cb, tb_cb, window_cb]
 
             # Self-play opponent update (for "policy" opponent mode)
             if hasattr(phase, "opponent") and phase.opponent == "policy":
