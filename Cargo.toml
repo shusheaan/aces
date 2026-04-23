@@ -5,6 +5,7 @@ members = [
     "crates/estimator",
     "crates/py-bridge",
     "crates/game",
+    "crates/batch-sim",
 ]
 resolver = "2"
 

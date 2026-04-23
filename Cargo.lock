@@ -62,6 +62,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aces-batch-sim"
+version = "0.1.0"
+dependencies = [
+ "aces-mppi",
+ "aces-sim-core",
+ "approx",
+ "bytemuck",
+ "nalgebra",
+ "rand",
+ "rand_distr",
+ "rayon",
+ "wgpu",
+]
+
+[[package]]
 name = "aces-estimator"
 version = "0.1.0"
 dependencies = [
