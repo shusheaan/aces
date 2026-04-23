@@ -77,8 +77,11 @@ class DroneDogfightEnv(gym.Env):
                 "info_gain_reward": 0.0,
                 "lost_contact_penalty": 0.0,
             },
-            "pursuit_evasive": {},
+            "pursuit_evasive": {
+                "approach_reward": 3.0,
+            },
             "search_pursuit": {
+                "approach_reward": 3.0,
                 "info_gain_reward": 0.1,
                 "lost_contact_penalty": 0.02,
             },
@@ -539,11 +542,15 @@ class DroneDogfightEnv(gym.Env):
         roll_diff = float(accel_cmd[1]) * scale
 
         base = hover + dz
+        # X-config mixing: tau_x = d*s*(FL - FR - RL + RR)
+        #                   tau_y = d*s*(FL + FR - RL - RR)
+        # For +roll (right): FL+RR up, FR+RL down → roll_diff positive on FL,RR
+        # For +pitch (forward): FL+FR down, RL+RR up → pitch_diff positive on RL,RR
         motors = [
             max(0.0, min(self._max_thrust, base - pitch_diff + roll_diff)),  # FL
             max(0.0, min(self._max_thrust, base - pitch_diff - roll_diff)),  # FR
-            max(0.0, min(self._max_thrust, base + pitch_diff + roll_diff)),  # RL
-            max(0.0, min(self._max_thrust, base + pitch_diff - roll_diff)),  # RR
+            max(0.0, min(self._max_thrust, base + pitch_diff - roll_diff)),  # RL
+            max(0.0, min(self._max_thrust, base + pitch_diff + roll_diff)),  # RR
         ]
         return motors
 
@@ -809,7 +816,7 @@ class DroneDogfightEnv(gym.Env):
             terminated = True
         # Opponent crashes — in pursuit tasks, don't reward free crashes
         elif result.drone_b_collision or result.drone_b_oob:
-            if self._task in ("pursuit_linear", "pursuit_evasive"):
+            if self._task in ("pursuit_linear", "pursuit_evasive", "search_pursuit"):
                 reward = 0.0
             else:
                 reward = float(rcfg["kill_reward"]) * 0.5
