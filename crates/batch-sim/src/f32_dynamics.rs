@@ -107,6 +107,37 @@ impl DroneStateF32 {
             angular_velocity: state.angular_velocity.cast::<f32>(),
         }
     }
+
+    /// Forward direction unit vector in world frame.
+    ///
+    /// Mirrors `DroneState::forward` (f64): body-frame +X rotated into world
+    /// by the current attitude.
+    #[inline]
+    pub fn forward(&self) -> Vector3<f32> {
+        self.attitude * Vector3::x()
+    }
+
+    /// Distance to another drone.
+    #[inline]
+    pub fn distance_to(&self, other: &DroneStateF32) -> f32 {
+        (other.position - self.position).norm()
+    }
+
+    /// Angle between forward direction and vector to other drone (radians).
+    ///
+    /// Mirrors `DroneState::angle_to` (f64). Returns 0 when the two drones
+    /// coincide to within 1e-6 (the f32 analogue of the 1e-12 f64 guard).
+    #[inline]
+    pub fn angle_to(&self, other: &DroneStateF32) -> f32 {
+        let to_other = other.position - self.position;
+        let dist = to_other.norm();
+        if dist < 1e-6 {
+            return 0.0;
+        }
+        let dir = to_other / dist;
+        let dot = self.forward().dot(&dir).clamp(-1.0, 1.0);
+        dot.acos()
+    }
 }
 
 /// Compute state derivative for RK4 integration (f32).
