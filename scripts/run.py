@@ -155,6 +155,10 @@ def run_train(args):
         task=args.task,
     )
 
+    if args.resume:
+        print(f"[ACES] Resuming from {args.resume}...")
+        trainer.load(args.resume)
+
     print(
         f"[ACES] Training for {timesteps} timesteps "
         f"(obs: {mode_str}, noise: {noise_str})..."
@@ -272,6 +276,13 @@ def main():
         type=float,
         default=None,
         help="Override observation noise std (0 to disable)",
+    )
+
+    # Resume from checkpoint
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume training from a saved model path (e.g., aces_model)",
     )
 
     # Evaluate mode

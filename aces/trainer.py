@@ -622,6 +622,12 @@ class SelfPlayTrainer:
             self._vec_env.save(path + "_vecnorm.pkl")
 
     def load(self, path: str = "aces_model"):
+        from stable_baselines3.common.vec_env import VecNormalize
+
+        vecnorm_path = path + "_vecnorm.pkl"
+        if Path(vecnorm_path).exists() and hasattr(self, "_vec_env"):
+            self._vec_env = VecNormalize.load(vecnorm_path, self._vec_env.venv)
+            logger.info("Loaded VecNormalize stats from %s", vecnorm_path)
         self.model = PPO.load(path, env=self._vec_env)
         self._setup_opponent()
 
