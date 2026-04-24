@@ -1,7 +1,31 @@
 # Plan: Parallel Simulation — Rayon Batch + WGPU GPU Acceleration
 
-Status: **Phase 1 complete, Phase 2–4 pending**
+Status: **Phase 1, Phase 2, Phase 3 complete — Phase 4 pending**
 Created: 2026-04-23
+Last updated: 2026-04-23 (Phase 2 + Phase 3 merged)
+
+User-facing guide for the GPU MPPI pipeline: [`docs/gpu-mppi.md`](../docs/gpu-mppi.md).
+
+---
+
+## Status (as of 2026-04-23)
+
+- **Phase 1 — Rayon CPU batch**: DONE (commit `c6b1d22` "add batch-sim crate for parallel battle simulation").
+- **Phase 2 — WGPU batch MPPI**: DONE. Landed as a series of merges from
+  `feature/f32-rk4-validation` (`b6ceb84`) through `feature/gpu-cpu-parity`
+  (`52836de`) and `feature/gpu-bench` (`b0f1082`). GPU pipeline lives in
+  `crates/batch-sim/src/gpu/` with WGSL shaders in `.../gpu/shaders/`.
+- **Phase 3 — PyO3 integration**: DONE. Landed across `feature/pyo3-gpu`
+  (`4278b9e`), `feature/orchestrator-gpu-opt` (`dc7a8cd`), `feature/gpu-vec-env`
+  (`bb6aa96`), `feature/gpu-ppo-mode` (`4b4d70c`), `feature/gpu-sb3-wrapper`
+  (`98ba353`), `feature/gpu-ppo-smoke` (`1be11aa`), and finally
+  `feature/curriculum-gpu-opt` (`fef1050`) which wires `--use-gpu-env` into the
+  curriculum trainer.
+- **Phase 4 — Full physics on GPU**: NOT STARTED. Section below is the
+  original design sketch and is preserved for reference.
+
+See [`docs/gpu-mppi.md`](../docs/gpu-mppi.md) for the end-user guide
+(requirements, build, examples, caveats, status table).
 
 ---
 
@@ -87,6 +111,12 @@ At production settings (1024×50), single-battle MPPI takes ~24ms.
 ---
 
 ## Phase 2: WGPU Batch MPPI
+
+**STATUS: DONE (2026-04-23).** Shipped in `crates/batch-sim/src/gpu/`
+(pipeline, shaders, orchestrator) behind the `gpu` cargo feature. See
+[`docs/gpu-mppi.md`](../docs/gpu-mppi.md) for the user-facing summary and the
+status table of the individual merged slices. The design sketch below is
+preserved for historical reference.
 
 ### Goal
 
@@ -215,6 +245,16 @@ If not, add renormalization every N steps in the shader.
 ---
 
 ## Phase 3: PyO3 Integration
+
+**STATUS: DONE (2026-04-23).** Shipped as `aces._core.GpuBatchMppi`
+(standalone planner) and `aces._core.GpuVecEnv` (SB3-compatible VecEnv) in
+`crates/py-bridge/`, plus the Python-side `aces.training.gpu_vec_env.GpuVecEnv`
+wrapper and the `--use-gpu-env` opt-in on `CurriculumTrainer`. The actual
+delivered design deviates from the sketch below in two ways:
+(a) the Python-facing class names are `GpuBatchMppi` / `GpuVecEnv` rather than
+`BatchVecEnv`, and (b) the current `GpuVecEnv` only supports MPPI-vs-MPPI
+opponent semantics (see caveats in `docs/gpu-mppi.md`). The original design
+sketch below is preserved for reference.
 
 ### Goal
 
