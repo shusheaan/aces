@@ -14,7 +14,6 @@ from aces.training.callbacks import (
     VecOpponentUpdateCallback,
     WindowSummaryCallback,
 )
-from aces.training.evaluate import evaluate
 from aces.training.logging import (
     create_run_dir,
     save_config_snapshot,
@@ -22,8 +21,19 @@ from aces.training.logging import (
     setup_logging,
 )
 from aces.training.opponent_pool import OpponentPool, PoolEntry
-from aces.training.self_play import SelfPlayTrainer
-from aces.training.curriculum_trainer import CurriculumTrainer
+
+# The following modules pull in `aces.env.dogfight`, which needs the Rust
+# `aces._core` extension. Guard them so that `import aces.training` (and
+# thus e.g. `aces.training.gpu_vec_env`'s pure-Python helpers) works in
+# environments where the extension isn't built yet.
+try:
+    from aces.training.evaluate import evaluate
+    from aces.training.self_play import SelfPlayTrainer
+    from aces.training.curriculum_trainer import CurriculumTrainer
+except ImportError:
+    evaluate = None  # type: ignore[assignment,misc]
+    SelfPlayTrainer = None  # type: ignore[assignment,misc]
+    CurriculumTrainer = None  # type: ignore[assignment,misc]
 
 try:
     from aces.training.gpu_vec_env import GpuVecEnv
