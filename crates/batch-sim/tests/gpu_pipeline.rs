@@ -11,7 +11,8 @@ use aces_batch_sim::f32_dynamics::DroneParamsF32;
 use aces_batch_sim::f32_sdf::{ArenaF32, ObstacleF32};
 use aces_batch_sim::gpu::adapter::probe_gpu;
 use aces_batch_sim::gpu::pipeline::{
-    CostWeightsGpu, DroneParamsGpu, GpuBatchMppi, GpuInitError, ObstacleGpu, MAX_OBSTACLES,
+    CostWeightsGpu, DroneParamsGpu, GpuBatchMppi, GpuInitError, MppiDims, ObstacleGpu,
+    MAX_OBSTACLES,
 };
 use nalgebra::Vector3;
 
@@ -106,6 +107,35 @@ fn test_pipeline_buffer_sizes() {
     assert_eq!(pipeline.params_uniform.size(), 48);
     assert_eq!(pipeline.weights_uniform.size(), 48);
     assert_eq!(pipeline.obstacles_buffer.size(), 1536);
+    // `MppiDims` uniform is always 32 bytes — see `test_mppi_dims_size_is_32`.
+    assert_eq!(pipeline.dims_uniform.size(), 32);
+}
+
+#[test]
+fn test_pipeline_exposes_dims_uniform() {
+    if !gpu_available_or_skip("test_pipeline_exposes_dims_uniform") {
+        return;
+    }
+    let params = DroneParamsF32::crazyflie();
+    let arena = warehouse_arena_f32();
+    let weights = default_weights();
+
+    let pipeline =
+        GpuBatchMppi::new(4, 32, 10, &params, weights, &arena).expect("pipeline construction");
+
+    // MppiDims is 32 bytes (size_of check above), and `new` must have
+    // allocated a UNIFORM-usage buffer of exactly that size.
+    assert_eq!(pipeline.dims_uniform.size(), 32);
+    assert!(pipeline
+        .dims_uniform
+        .usage()
+        .contains(wgpu::BufferUsages::UNIFORM));
+
+    // update_dims must succeed without panicking. We can't easily read
+    // back the uniform without a dispatch; a smoke-level write is enough
+    // to catch buffer-kind mismatches in debug builds.
+    let new_dims = MppiDims::new(4, 32, 10, 20, arena.obstacles.len() as u32, 0.0005);
+    pipeline.update_dims(new_dims);
 }
 
 #[test]
@@ -134,6 +164,14 @@ fn test_pipeline_rejects_too_many_obstacles() {
 }
 
 // ----- Pure struct-layout checks (no GPU needed) -----
+
+#[test]
+fn test_mppi_dims_size_is_32() {
+    // MppiDims is a 32-byte uniform (6 scalars + 2 × f32 pad). WGSL
+    // requires uniform-struct size to be a multiple of 16 B.
+    assert_eq!(std::mem::size_of::<MppiDims>(), 32);
+    assert_eq!(std::mem::size_of::<MppiDims>() % 16, 0);
+}
 
 #[test]
 fn test_drone_params_gpu_layout() {

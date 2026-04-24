@@ -23,9 +23,12 @@
 //! | 7       | uniform  | DroneParamsGpu                       | read        |
 //! | 8       | uniform  | CostWeightsGpu + arena bounds        | read        |
 //! | 9       | storage  | obstacles[MAX_OBSTACLES]             | read        |
+//! | 10      | uniform  | MppiDims                             | read        |
 //!
 //! `N_DRONES = n_battles * 2`, `N = n_samples`, `H = horizon`. All buffers use
-//! f32 (u32 for obstacle kind tag).
+//! f32 (u32 for obstacle kind tag). `MppiDims` is a 32-byte uniform carrying
+//! the runtime-configurable rollout dimensions (`n_drones`, `n_samples`,
+//! `horizon`, `substeps`, `n_obstacles`, `dt_sim`).
 
 use bytemuck::{Pod, Zeroable};
 
@@ -145,6 +148,59 @@ pub struct ObstacleGpu {
     pub param_b: f32,
 }
 
+/// Runtime MPPI dimensions, GPU-compatible layout (binding 10 uniform).
+///
+/// The `rollout_and_cost` kernel uses these to index the states / noise /
+/// cost buffers and to control the RK4 sub-step loop. Kept separate from
+/// [`DroneParamsGpu`] so callers can retune `substeps` / `dt_sim` at
+/// runtime without re-uploading physical parameters.
+///
+/// Exactly 32 bytes: six scalars (24 B) plus two trailing f32 pads to keep
+/// the size a multiple of 16 (WGSL uniform alignment rule). All padding is
+/// explicit so `bytemuck::Pod` accepts the type.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct MppiDims {
+    pub n_drones: u32,
+    pub n_samples: u32,
+    pub horizon: u32,
+    pub substeps: u32,
+    pub n_obstacles: u32,
+    pub dt_sim: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+}
+
+impl MppiDims {
+    /// Construct `MppiDims` from high-level rollout parameters. Defaults
+    /// used by [`GpuBatchMppi::new`]:
+    ///   * `substeps = 10` (10 × 0.001 s = 10 ms control tick)
+    ///   * `dt_sim   = 0.001` s (1 kHz physics)
+    ///
+    /// Callers that need to retune the physics step can build an
+    /// `MppiDims` directly and push it via
+    /// [`GpuBatchMppi::update_dims`].
+    pub fn new(
+        n_drones: u32,
+        n_samples: u32,
+        horizon: u32,
+        substeps: u32,
+        n_obstacles: u32,
+        dt_sim: f32,
+    ) -> Self {
+        Self {
+            n_drones,
+            n_samples,
+            horizon,
+            substeps,
+            n_obstacles,
+            dt_sim,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+}
+
 impl ObstacleGpu {
     pub fn from_f32(obs: &ObstacleF32) -> Self {
         match obs {
@@ -262,6 +318,9 @@ pub struct GpuBatchMppi {
 
     // Obstacle storage buffer (fixed MAX_OBSTACLES slots)
     pub obstacles_buffer: wgpu::Buffer,
+
+    // Rollout dims uniform (binding 10). 32 bytes of `MppiDims`.
+    pub dims_uniform: wgpu::Buffer,
 }
 
 impl GpuBatchMppi {
@@ -311,6 +370,7 @@ impl GpuBatchMppi {
         let params_uniform_size = std::mem::size_of::<DroneParamsGpu>() as u64;
         let weights_uniform_size = std::mem::size_of::<CostWeightsGpu>() as u64;
         let obstacles_size = (MAX_OBSTACLES * std::mem::size_of::<ObstacleGpu>()) as u64;
+        let dims_uniform_size = std::mem::size_of::<MppiDims>() as u64;
 
         let storage_usage = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
@@ -341,6 +401,7 @@ impl GpuBatchMppi {
         let weights_uniform = make_buf("mppi.weights", weights_uniform_size, uniform_usage);
         // obstacles are uploaded once and only read by the shader — no COPY_SRC needed
         let obstacles_buffer = make_buf("mppi.obstacles", obstacles_size, obstacles_usage);
+        let dims_uniform = make_buf("mppi.dims", dims_uniform_size, uniform_usage);
 
         // Upload static uniforms
         let params_gpu = DroneParamsGpu::from_f32(params);
@@ -356,6 +417,19 @@ impl GpuBatchMppi {
             obstacles_gpu.push(ObstacleGpu::zeroed());
         }
         queue.write_buffer(&obstacles_buffer, 0, bytemuck::cast_slice(&obstacles_gpu));
+
+        // Upload default MppiDims. `substeps=10`, `dt_sim=0.001` gives a
+        // 10 ms control tick at 1 kHz physics — matches the CPU pipeline
+        // defaults. Callers can retune via `update_dims`.
+        let dims = MppiDims::new(
+            n_drones as u32,
+            n_samples as u32,
+            horizon as u32,
+            10,
+            n_obstacles as u32,
+            0.001,
+        );
+        queue.write_buffer(&dims_uniform, 0, bytemuck::bytes_of(&dims));
 
         Ok(Self {
             device,
@@ -374,6 +448,19 @@ impl GpuBatchMppi {
             params_uniform,
             weights_uniform,
             obstacles_buffer,
+            dims_uniform,
         })
+    }
+
+    /// Overwrite the `MppiDims` uniform buffer with new values.
+    ///
+    /// Useful when the caller wants to change `substeps` / `dt_sim` at
+    /// runtime without rebuilding the pipeline (e.g. switching between a
+    /// 1 kHz and 2 kHz physics tick). The buffer write is queued on the
+    /// internal queue; the new values take effect on the next compute
+    /// dispatch.
+    pub fn update_dims(&self, dims: MppiDims) {
+        self.queue
+            .write_buffer(&self.dims_uniform, 0, bytemuck::bytes_of(&dims));
     }
 }

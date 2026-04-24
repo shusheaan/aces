@@ -16,18 +16,48 @@
 //!
 //! # Public surface
 //!
-//! - [`MPPI_HELPERS_WGSL`] — the shader source as a `&'static str`.
-//! - [`validate_mppi_helpers`] — parse + validate, return the naga module.
+//! - [`MPPI_HELPERS_WGSL`] — helpers-only shader source.
+//! - [`MPPI_ROLLOUT_WGSL`] — rollout-kernel shader source.
+//! - [`full_mppi_source`] — concatenation of helpers + rollout, ready to
+//!   feed into `wgpu::ShaderSource::Wgsl`.
+//! - [`validate_mppi_helpers`] — parse + validate the helpers module.
+//! - [`validate_full_mppi`] — parse + validate the concatenated source
+//!   (helpers + rollout kernel with all bindings).
 //! - [`ValidationError`] — a simple `Parse` / `Validate` error enum that
-//!   stringifies naga's internal error types so callers don't have to depend
-//!   on naga details.
+//!   stringifies naga's internal error types so callers don't have to
+//!   depend on naga details.
 
 use wgpu::naga;
 
 /// The mppi_helpers WGSL source, embedded at compile time.
 pub const MPPI_HELPERS_WGSL: &str = include_str!("shaders/mppi_helpers.wgsl");
 
-/// Error returned by [`validate_mppi_helpers`]. The naga error types carry a
+/// The rollout-kernel WGSL source (bindings + `rollout_and_cost`),
+/// embedded at compile time. Must be concatenated with
+/// [`MPPI_HELPERS_WGSL`] for standalone use — see [`full_mppi_source`].
+pub const MPPI_ROLLOUT_WGSL: &str = include_str!("shaders/mppi_rollout.wgsl");
+
+/// The full MPPI shader source: helpers first, then the rollout kernel.
+///
+/// WGSL has no `#include`, so helpers must appear in the same translation
+/// unit as the kernel. The helpers file owns struct definitions
+/// (`DroneParams`, `CostWeights`, `Obstacle`, `DroneState`,
+/// `StateDerivative`) and all 12 helper functions; the rollout file adds
+/// `MppiDims`, the 11 bind-group declarations, stage-cost wrappers, and
+/// the `@compute` entry point.
+///
+/// A newline is inserted between the two files to guard against a file
+/// that ends without one — WGSL otherwise fuses the last token of the
+/// helpers with the first token of the rollout.
+pub fn full_mppi_source() -> String {
+    let mut src = String::with_capacity(MPPI_HELPERS_WGSL.len() + MPPI_ROLLOUT_WGSL.len() + 1);
+    src.push_str(MPPI_HELPERS_WGSL);
+    src.push('\n');
+    src.push_str(MPPI_ROLLOUT_WGSL);
+    src
+}
+
+/// Error returned by the validation helpers. The naga error types carry a
 /// lot of internal machinery; we stringify them here so callers can just
 /// print the message.
 #[derive(Debug)]
@@ -49,14 +79,9 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// Parse and validate the mppi_helpers shader.
-///
-/// Returns the parsed [`naga::Module`] on success. The module can be
-/// introspected (e.g. for tests that verify struct sizes or function
-/// presence) without dispatching any GPU work.
-pub fn validate_mppi_helpers() -> Result<naga::Module, ValidationError> {
-    let module = naga::front::wgsl::parse_str(MPPI_HELPERS_WGSL)
-        .map_err(|e| ValidationError::Parse(e.emit_to_string(MPPI_HELPERS_WGSL)))?;
+fn validate_source(src: &str) -> Result<naga::Module, ValidationError> {
+    let module = naga::front::wgsl::parse_str(src)
+        .map_err(|e| ValidationError::Parse(e.emit_to_string(src)))?;
 
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
@@ -67,6 +92,25 @@ pub fn validate_mppi_helpers() -> Result<naga::Module, ValidationError> {
         .map_err(|e| ValidationError::Validate(format!("{e:?}")))?;
 
     Ok(module)
+}
+
+/// Parse and validate the mppi_helpers shader.
+///
+/// Returns the parsed [`naga::Module`] on success. The module can be
+/// introspected (e.g. for tests that verify struct sizes or function
+/// presence) without dispatching any GPU work.
+pub fn validate_mppi_helpers() -> Result<naga::Module, ValidationError> {
+    validate_source(MPPI_HELPERS_WGSL)
+}
+
+/// Parse and validate the full MPPI shader (helpers + rollout kernel).
+///
+/// Returns the parsed [`naga::Module`]. Callers can walk `entry_points`
+/// to confirm `rollout_and_cost` is present and `global_variables` to
+/// confirm all 11 bindings (0..10) resolve against the concatenated
+/// source.
+pub fn validate_full_mppi() -> Result<naga::Module, ValidationError> {
+    validate_source(&full_mppi_source())
 }
 
 #[cfg(test)]
@@ -165,5 +209,99 @@ mod tests {
         assert_eq!(std::mem::size_of::<DroneParamsGpu>(), 48);
         assert_eq!(std::mem::size_of::<CostWeightsGpu>(), 48);
         assert_eq!(std::mem::size_of::<ObstacleGpu>(), 48);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rollout kernel validation tests.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mppi_rollout_wgsl_parses_and_validates() {
+        // Concatenated helpers + rollout must parse and validate as a
+        // single module. If naga rejects, the GPU will too.
+        match validate_full_mppi() {
+            Ok(_) => {}
+            Err(e) => panic!("full MPPI shader validation failed:\n{e}"),
+        }
+    }
+
+    #[test]
+    fn test_mppi_rollout_entry_point_present() {
+        let module = validate_full_mppi().expect("full shader validation failed");
+
+        let entries: Vec<&naga::EntryPoint> = module.entry_points.iter().collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly 1 entry point, got {}: {:?}",
+            entries.len(),
+            entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+
+        let ep = entries[0];
+        assert_eq!(ep.name, "rollout_and_cost", "entry point name mismatch");
+        assert_eq!(
+            ep.stage,
+            naga::ShaderStage::Compute,
+            "entry point stage must be Compute"
+        );
+        assert_eq!(
+            ep.workgroup_size,
+            [1u32, 1u32, 1u32],
+            "workgroup_size must be (1,1,1); dispatch is per-sample/per-drone"
+        );
+    }
+
+    #[test]
+    fn test_mppi_rollout_uses_all_bindings() {
+        let module = validate_full_mppi().expect("full shader validation failed");
+
+        // Collect (group, binding) pairs from all global variables.
+        let mut bindings: Vec<(u32, u32)> = module
+            .global_variables
+            .iter()
+            .filter_map(|(_, gv)| gv.binding.as_ref().map(|rb| (rb.group, rb.binding)))
+            .collect();
+        bindings.sort();
+
+        // Expect @group(0) @binding(0..=10).
+        let expected: Vec<(u32, u32)> = (0u32..=10).map(|b| (0u32, b)).collect();
+        for exp in &expected {
+            assert!(
+                bindings.contains(exp),
+                "missing binding {:?}; found: {:?}",
+                exp,
+                bindings
+            );
+        }
+    }
+
+    /// The `MppiDims` WGSL struct must agree with the Rust-side POD
+    /// struct (32 bytes). Checks both sides in one test so a layout
+    /// regression in either surfaces here.
+    #[test]
+    fn test_mppi_dims_struct_size() {
+        use crate::gpu::pipeline::MppiDims;
+        assert_eq!(
+            std::mem::size_of::<MppiDims>(),
+            32,
+            "Rust MppiDims must be 32 bytes (matches WGSL layout)"
+        );
+
+        let module = validate_full_mppi().expect("full shader validation failed");
+        let ty = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("MppiDims"))
+            .expect("WGSL struct `MppiDims` not found in module")
+            .1;
+        let span = match &ty.inner {
+            naga::TypeInner::Struct { span, .. } => *span,
+            other => panic!("type `MppiDims` is not a struct: {other:?}"),
+        };
+        assert_eq!(
+            span, 32,
+            "WGSL struct `MppiDims` size {span} != 32 (Rust POD size)"
+        );
     }
 }
