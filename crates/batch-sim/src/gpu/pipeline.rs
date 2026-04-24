@@ -620,6 +620,12 @@ impl GpuBatchMppi {
     ///      (matches kernel: `wid.x=drone`).
     ///   5. Copy `result_buffer` into a staging buffer, submit, map-read.
     ///
+    /// # Contract
+    /// The quaternion portion of each drone state (`states[base+6..=9]` and
+    /// `enemies[base+6..=9]`, xyzw layout) MUST be a unit quaternion. The GPU
+    /// kernel does NOT renormalize on unpack; if input drift past unit norm,
+    /// trajectory integration will drift and GPU/CPU parity will not hold.
+    ///
     /// # Panics
     /// Panics if the input slice lengths don't match the configured
     /// dimensions.
