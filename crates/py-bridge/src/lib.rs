@@ -1212,6 +1212,7 @@ mod gpu_binding {
             dt_ctrl = 0.01,
             substeps = 10,
             wind_sigma = 0.0,
+            wind_theta = 2.0,
             seed = 42,
             // Reward config (defaults match `RewardConfig::default()` /
             // configs/rules.toml [reward]). Overridable from Python so
@@ -1235,6 +1236,7 @@ mod gpu_binding {
             dt_ctrl: f64,
             substeps: usize,
             wind_sigma: f64,
+            wind_theta: f64,
             seed: u64,
             kill_reward: f64,
             killed_penalty: f64,
@@ -1253,7 +1255,7 @@ mod gpu_binding {
                 dt_ctrl,
                 substeps,
                 wind_sigma,
-                wind_theta: 2.0,
+                wind_theta,
             };
             let reward_config = RewardConfig {
                 kill_reward,
