@@ -13,6 +13,9 @@ aces/
 │   ├── mppi/                   #   MPPI controller (standard + CVaR + belief-weighted)
 │   ├── estimator/              #   EKF + particle filter
 │   ├── py-bridge/              #   PyO3 bindings -> aces._core
+│   ├── batch-sim/              #   Parallel battles (Rayon) + GPU MPPI
+│   │   ├── src/f32_{dynamics,sdf,cost}.rs  # f32 CPU reference (GPU parity baseline)
+│   │   └── src/gpu/            #     GPU MPPI: pipeline, orchestrator, WGSL shaders
 │   └── game/                   #   Bevy 3D interactive visualizer + NN policy loading
 ├── aces/                       # Python package (subpackages)
 │   ├── config.py               #   Typed TOML config loading
@@ -27,6 +30,7 @@ aces/
 │   │   ├── curriculum_trainer.py #   Curriculum-based multi-phase trainer
 │   │   ├── callbacks.py        #     SB3 training callbacks
 │   │   ├── evaluate.py         #     Model evaluation utilities
+│   │   ├── gpu_vec_env.py          #     GPU-backed SB3 VecEnv wrapper
 │   │   ├── opponent_pool.py    #     Elo-rated opponent pool
 │   │   ├── batched_vec_env.py  #     Batched opponent inference VecEnv
 │   │   └── logging.py          #     Structured logging + run metadata
@@ -65,6 +69,7 @@ pytest tests/ -v                # Python tests (env, trainer, curriculum, viz)
 python scripts/run.py --mode train --fpv --timesteps 500000   # train FPV agent
 python scripts/run.py --mode train --task pursuit_linear --timesteps 200000  # single curriculum stage
 python scripts/run.py --mode curriculum --timesteps 200000,300000,300000,500000  # full curriculum
+poetry run python scripts/run.py --mode curriculum --use-gpu-env --n-envs 16  # GPU-batched curriculum training (see docs/gpu-mppi.md)
 python scripts/run.py --mode export --model-path aces_model --save-path policy   # export for Bevy
 python scripts/run.py --mode evaluate --model-path aces_model # evaluate
 python scripts/train_server.py --n-envs 8  # headless server training
