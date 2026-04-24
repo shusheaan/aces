@@ -32,8 +32,10 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::f32_dynamics::DroneParamsF32;
+use crate::f32_cost::{evasion_cost_f32, pursuit_cost_f32, CostWeightsF32};
+use crate::f32_dynamics::{step_rk4_f32, DroneParamsF32, DroneStateF32};
 use crate::f32_sdf::{ArenaF32, ObstacleF32};
+use nalgebra::{Quaternion, UnitQuaternion, Vector3, Vector4};
 
 /// Maximum number of obstacles that can be uploaded to the GPU obstacle buffer.
 ///
@@ -618,6 +620,12 @@ impl GpuBatchMppi {
     ///      (matches kernel: `wid.x=drone`).
     ///   5. Copy `result_buffer` into a staging buffer, submit, map-read.
     ///
+    /// # Contract
+    /// The quaternion portion of each drone state (`states[base+6..=9]` and
+    /// `enemies[base+6..=9]`, xyzw layout) MUST be a unit quaternion. The GPU
+    /// kernel does NOT renormalize on unpack; if input drift past unit norm,
+    /// trajectory integration will drift and GPU/CPU parity will not hold.
+    ///
     /// # Panics
     /// Panics if the input slice lengths don't match the configured
     /// dimensions.
@@ -797,6 +805,234 @@ impl GpuBatchMppi {
         staging.unmap();
 
         result
+    }
+}
+
+/// Pure-CPU f32 reference implementation of the two GPU kernels
+/// (`rollout_and_cost` + `softmax_reduce`).
+///
+/// Mirrors [`GpuBatchMppi::compute_batch_actions`] exactly in f32
+/// arithmetic. Used as the keystone parity oracle for GPU validation:
+/// if the GPU output and this CPU output agree to within f32 accumulation
+/// tolerance, the GPU pipeline is trustworthy.
+///
+/// Semantics (per drone `d`):
+///  1. Unpack the starting state from `states[d*13..]` and the enemy
+///     state from `enemies[d*13..]` (the caller pre-pairs opponents —
+///     same convention as the GPU kernel).
+///  2. For each of `dims.n_samples` samples:
+///      * Clone the starting state.
+///      * For each horizon step `h`:
+///         * `u = clamp(mean_ctrl[h] + noise[s, h], 0, max_thrust)`
+///           component-wise. Store `u` in a per-sample ctrls buffer.
+///         * Run `dims.substeps` RK4 sub-steps with wind = 0 (matches
+///           the GPU kernel — wind is currently not wired on the GPU
+///           path).
+///         * Accumulate stage cost. Drone pairing: even `d` → pursuit,
+///           odd `d` → evasion. Mirrors `mppi_rollout.wgsl`
+///           `(drone_idx & 1u) == 0u`.
+///      * Store total cost in `costs[s]`.
+///  3. Softmax-weighted mean control per (horizon, motor):
+///      * `min_cost = min(costs)`
+///      * `total_w = Σ exp(-(costs[s] - min_cost) / T)`
+///      * `inv_total = 1 / total_w` if `total_w > 0` else `0`
+///      * `result[d][h][m] = Σ_s ctrls[s][h][m] * exp(...) * inv_total`
+///
+/// The hover-thrust value used inside the cost functions comes from
+/// `weights_cost.hover_thrust_for_gpu_parity` — see below. The GPU
+/// kernel reads `weights.hover` from the `CostWeightsGpu` uniform
+/// (binding 8), so callers wanting parity must pass the same numeric
+/// value here that was packed into `CostWeightsGpu::hover`.
+///
+/// # Panics
+/// Panics if slice lengths don't match the configured dimensions.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn compute_batch_actions_cpu_reference(
+    params: &DroneParamsF32,
+    arena: &ArenaF32,
+    weights_cost: &CostWeightsF32,
+    hover_thrust: f32,
+    dims: MppiDims,
+    states: &[f32],
+    enemies: &[f32],
+    mean_ctrls: &[f32],
+    noise: &[f32],
+) -> Vec<f32> {
+    let n_drones = dims.n_drones as usize;
+    let n_samples = dims.n_samples as usize;
+    let horizon = dims.horizon as usize;
+    let substeps = dims.substeps as usize;
+    let dt_sim = dims.dt_sim;
+    let temperature = dims.temperature;
+
+    assert_eq!(states.len(), n_drones * STATE_DIM);
+    assert_eq!(enemies.len(), n_drones * STATE_DIM);
+    assert_eq!(mean_ctrls.len(), n_drones * horizon * 4);
+    assert_eq!(noise.len(), n_drones * n_samples * horizon * 4);
+
+    // Unpack a 13-float state at offset `base` → DroneStateF32.
+    // Layout: pos3 (0..3), vel3 (3..6), quat_xyzw (6..10), angvel3 (10..13).
+    // `UnitQuaternion::from_quaternion` takes `Quaternion::new(w, x, y, z)`
+    // (w-first), so we reorder explicitly.
+    let unpack = |buf: &[f32], d: usize| -> DroneStateF32 {
+        let base = d * STATE_DIM;
+        DroneStateF32 {
+            position: Vector3::new(buf[base], buf[base + 1], buf[base + 2]),
+            velocity: Vector3::new(buf[base + 3], buf[base + 4], buf[base + 5]),
+            attitude: UnitQuaternion::from_quaternion(Quaternion::new(
+                buf[base + 9],
+                buf[base + 6],
+                buf[base + 7],
+                buf[base + 8],
+            )),
+            angular_velocity: Vector3::new(buf[base + 10], buf[base + 11], buf[base + 12]),
+        }
+    };
+
+    let mut result = vec![0.0f32; n_drones * horizon * 4];
+    let wind = Vector3::<f32>::zeros();
+
+    for d in 0..n_drones {
+        let state0 = unpack(states, d);
+        let enemy = unpack(enemies, d);
+        let is_pursuit = d % 2 == 0;
+
+        // Per-sample perturbed control buffer: [n_samples][horizon][4].
+        let mut sim_ctrls = vec![0.0f32; n_samples * horizon * 4];
+        let mut costs = vec![0.0f32; n_samples];
+
+        let mean_drone_stride = horizon * 4;
+        let noise_drone_stride = n_samples * horizon * 4;
+        let sample_stride = horizon * 4;
+
+        for s in 0..n_samples {
+            let mut state_sim = state0.clone();
+            let mut total_cost = 0.0f32;
+
+            for h in 0..horizon {
+                let mean_base = d * mean_drone_stride + h * 4;
+                let noise_base = d * noise_drone_stride + s * sample_stride + h * 4;
+
+                let u_raw = Vector4::new(
+                    mean_ctrls[mean_base] + noise[noise_base],
+                    mean_ctrls[mean_base + 1] + noise[noise_base + 1],
+                    mean_ctrls[mean_base + 2] + noise[noise_base + 2],
+                    mean_ctrls[mean_base + 3] + noise[noise_base + 3],
+                );
+                let u = Vector4::new(
+                    u_raw[0].clamp(0.0, params.max_thrust),
+                    u_raw[1].clamp(0.0, params.max_thrust),
+                    u_raw[2].clamp(0.0, params.max_thrust),
+                    u_raw[3].clamp(0.0, params.max_thrust),
+                );
+
+                // Persist perturbed control.
+                let out_base = s * sample_stride + h * 4;
+                sim_ctrls[out_base] = u[0];
+                sim_ctrls[out_base + 1] = u[1];
+                sim_ctrls[out_base + 2] = u[2];
+                sim_ctrls[out_base + 3] = u[3];
+
+                // RK4 sub-stepping (wind = 0 to match GPU kernel).
+                for _ in 0..substeps {
+                    state_sim = step_rk4_f32(&state_sim, &u, params, dt_sim, &wind);
+                }
+
+                // Stage cost.
+                let stage_cost = if is_pursuit {
+                    pursuit_cost_f32(&state_sim, &enemy, &u, hover_thrust, arena, weights_cost)
+                } else {
+                    evasion_cost_f32(&state_sim, &enemy, &u, hover_thrust, arena, weights_cost)
+                };
+                total_cost += stage_cost;
+            }
+
+            costs[s] = total_cost;
+        }
+
+        // -----------------------------------------------------------------
+        // Softmax step — mirrors `softmax_reduce` kernel.
+        // -----------------------------------------------------------------
+        let min_cost = costs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let total_w: f32 = costs
+            .iter()
+            .map(|c| (-(c - min_cost) / temperature).exp())
+            .sum();
+        let inv_total = if total_w > 0.0 { 1.0 / total_w } else { 0.0 };
+
+        let result_drone_stride = horizon * 4;
+        for h in 0..horizon {
+            for m in 0..4 {
+                let mut acc = 0.0f32;
+                for s in 0..n_samples {
+                    let w = (-(costs[s] - min_cost) / temperature).exp() * inv_total;
+                    acc += sim_ctrls[s * sample_stride + h * 4 + m] * w;
+                }
+                result[d * result_drone_stride + h * 4 + m] = acc;
+            }
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod cpu_ref_tests {
+    use super::*;
+
+    /// With zero noise every sample has identical cost → uniform softmax
+    /// weights → the weighted mean equals the shared per-sample ctrl,
+    /// which (since noise is zero) equals the input `mean_ctrls`.
+    ///
+    /// This isolates CPU-reference correctness before comparing against
+    /// the GPU, so a parity failure can be blamed on the GPU rather than
+    /// on the reference.
+    #[test]
+    fn test_cpu_reference_zero_noise_returns_mean_ctrls() {
+        let params = DroneParamsF32::crazyflie();
+        let arena = ArenaF32::new(Vector3::new(10.0, 10.0, 3.0));
+        let cost_weights = CostWeightsF32::default();
+        let dims = MppiDims::new(2, 16, 5, 10, 0, 0.001);
+
+        // Drone 0 at (0, 0, 1), drone 1 at (0, 0, 1). Identity quaternion.
+        let mut states = vec![0.0f32; 2 * STATE_DIM];
+        states[2] = 1.0; // drone 0 z
+        states[9] = 1.0; // drone 0 quat w
+        states[STATE_DIM + 2] = 1.0; // drone 1 z
+        states[STATE_DIM + 9] = 1.0; // drone 1 quat w
+
+        // Enemy: drone 0 sees enemy at (2, 0, 1); drone 1 sees (5, 0, 1).
+        let mut enemies = vec![0.0f32; 2 * STATE_DIM];
+        enemies[0] = 2.0;
+        enemies[2] = 1.0;
+        enemies[9] = 1.0;
+        enemies[STATE_DIM] = 5.0;
+        enemies[STATE_DIM + 2] = 1.0;
+        enemies[STATE_DIM + 9] = 1.0;
+
+        let hover = params.hover_thrust();
+        let mean_ctrls = vec![hover; 2 * 5 * 4];
+        let noise = vec![0.0f32; 2 * 16 * 5 * 4];
+
+        let result = compute_batch_actions_cpu_reference(
+            &params,
+            &arena,
+            &cost_weights,
+            hover,
+            dims,
+            &states,
+            &enemies,
+            &mean_ctrls,
+            &noise,
+        );
+
+        for (i, &r) in result.iter().enumerate() {
+            assert!(r.is_finite(), "non-finite at index {i}: {r}");
+            assert!(
+                (r - hover).abs() < 1e-4,
+                "result[{i}] = {r}, expected {hover}"
+            );
+        }
     }
 }
 
