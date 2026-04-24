@@ -11,22 +11,36 @@
 //! If no GPU adapter is available (e.g. inside some sandboxes), the CPU
 //! columns still produce numbers while the GPU columns show NaN.
 
-#![cfg(feature = "gpu")]
+#[cfg(not(feature = "gpu"))]
+fn main() {
+    eprintln!("GPU feature not enabled. Run with: --features gpu");
+    std::process::exit(1);
+}
 
+#[cfg(feature = "gpu")]
 use std::time::Instant;
 
+#[cfg(feature = "gpu")]
 use nalgebra::Vector3;
+#[cfg(feature = "gpu")]
 use rand::{rngs::SmallRng, Rng, SeedableRng};
+#[cfg(feature = "gpu")]
 use rand_distr::{Distribution, Normal};
 
+#[cfg(feature = "gpu")]
 use aces_batch_sim::f32_cost::CostWeightsF32;
+#[cfg(feature = "gpu")]
 use aces_batch_sim::f32_dynamics::DroneParamsF32;
+#[cfg(feature = "gpu")]
 use aces_batch_sim::f32_sdf::{ArenaF32, ObstacleF32};
+#[cfg(feature = "gpu")]
 use aces_batch_sim::gpu::adapter::probe_gpu;
+#[cfg(feature = "gpu")]
 use aces_batch_sim::gpu::pipeline::{
     compute_batch_actions_cpu_reference, CostWeightsGpu, GpuBatchMppi, MppiDims,
 };
 
+#[cfg(feature = "gpu")]
 fn warehouse_arena() -> ArenaF32 {
     let mut arena = ArenaF32::new(Vector3::new(10.0, 10.0, 3.0));
     for (x, y) in [
@@ -44,10 +58,12 @@ fn warehouse_arena() -> ArenaF32 {
     arena
 }
 
+#[cfg(feature = "gpu")]
 fn default_gpu_weights() -> CostWeightsGpu {
     CostWeightsGpu::new(1.0, 5.0, 0.01, 1000.0, 0.3, 0.0, [10.0, 10.0, 3.0])
 }
 
+#[cfg(feature = "gpu")]
 fn generate_inputs(
     n_drones: usize,
     n_samples: usize,
@@ -86,6 +102,7 @@ fn generate_inputs(
     (states, enemies, mean_ctrls, noise)
 }
 
+#[cfg(feature = "gpu")]
 #[allow(clippy::too_many_arguments)]
 fn bench_config(
     label: &str,
@@ -194,6 +211,7 @@ fn bench_config(
     );
 }
 
+#[cfg(feature = "gpu")]
 fn main() {
     let probe = probe_gpu();
     let gpu_available = probe.compute_capable;
