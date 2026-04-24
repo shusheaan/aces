@@ -231,6 +231,10 @@ fn test_bind_group_assembles_against_layout() {
                     binding: 10,
                     resource: pipeline.dims_uniform.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: pipeline.wind_buffer.as_entire_binding(),
+                },
             ],
         });
 }

@@ -304,7 +304,24 @@ impl GpuBatchOrchestrator {
             noise.push(normal.sample(&mut self.noise_rng));
         }
 
-        // 3. One GPU dispatch, producing new optimal mean control sequences.
+        // 3. Extract current per-drone wind (held constant across the rollout
+        //    horizon — see `mppi_rollout.wgsl` header). Drone order matches
+        //    state packing: `[battle0_A, battle0_B, battle1_A, battle1_B, ...]`.
+        let winds: Vec<[f32; 3]> = self
+            .battles
+            .iter()
+            .flat_map(|b| {
+                let wa = b.wind_a.force;
+                let wb = b.wind_b.force;
+                [
+                    [wa.x as f32, wa.y as f32, wa.z as f32],
+                    [wb.x as f32, wb.y as f32, wb.z as f32],
+                ]
+            })
+            .collect();
+        self.pipeline.set_wind(&winds);
+
+        // 4. One GPU dispatch, producing new optimal mean control sequences.
         self.pipeline
             .compute_batch_actions(&states, &enemies, &self.mean_ctrls, &noise)
     }

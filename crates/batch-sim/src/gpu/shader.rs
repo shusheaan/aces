@@ -51,7 +51,7 @@ pub const MPPI_SOFTMAX_WGSL: &str = include_str!("shaders/mppi_softmax.wgsl");
 /// unit as the kernel. The helpers file owns struct definitions
 /// (`DroneParams`, `CostWeights`, `Obstacle`, `DroneState`,
 /// `StateDerivative`) and all 12 helper functions; the rollout file adds
-/// `MppiDims`, the 11 bind-group declarations, stage-cost wrappers, and
+/// `MppiDims`, the 12 bind-group declarations, stage-cost wrappers, and
 /// the `rollout_and_cost` @compute entry point; the softmax file adds
 /// workgroup-shared scratch buffers and the `softmax_reduce` @compute
 /// entry point. Both entry points share the same bindings.
@@ -121,7 +121,7 @@ pub fn validate_mppi_helpers() -> Result<naga::Module, ValidationError> {
 ///
 /// Returns the parsed [`naga::Module`]. Callers can walk `entry_points`
 /// to confirm `rollout_and_cost` is present and `global_variables` to
-/// confirm all 11 bindings (0..10) resolve against the concatenated
+/// confirm all 12 bindings (0..11) resolve against the concatenated
 /// source.
 pub fn validate_full_mppi() -> Result<naga::Module, ValidationError> {
     validate_source(&full_mppi_source())
@@ -369,8 +369,8 @@ mod tests {
             .collect();
         bindings.sort();
 
-        // Expect @group(0) @binding(0..=10).
-        let expected: Vec<(u32, u32)> = (0u32..=10).map(|b| (0u32, b)).collect();
+        // Expect @group(0) @binding(0..=11).
+        let expected: Vec<(u32, u32)> = (0u32..=11).map(|b| (0u32, b)).collect();
         for exp in &expected {
             assert!(
                 bindings.contains(exp),

@@ -7,7 +7,7 @@
 // `Obstacle`, `DroneState`, `StateDerivative`). This file adds:
 //
 //   * `MppiDims` — runtime-configurable rollout dims (binding 10)
-//   * All bind-group declarations (bindings 0..10)
+//   * All bind-group declarations (bindings 0..11)
 //   * Thin wrappers (`pursuit_cost_gpu`, `evasion_cost_gpu`,
 //     `arena_sdf_from_storage`) that adapt the helper signatures to the
 //     storage-bound obstacle buffer / externally-computed sdf.
@@ -33,11 +33,14 @@
 //
 // # Wind
 //
-// Wind is currently zero everywhere. Per-sample wind perturbation is a
-// follow-up optimisation (store wind samples in the tail of the noise
-// buffer or in a dedicated binding). The `rk4_step` helper already
-// accepts a world-frame external force, so flipping wind back on is a
-// one-line change.
+// Per-drone wind is uploaded via binding 11 (`wind_per_drone`) as a
+// flat `array<f32>` with 4 floats per drone (vec3 + 1 pad slot for
+// std140 alignment). The host writes it each tick via
+// `GpuBatchMppi::set_wind`; when unset it is zero-initialized on
+// construction, matching the previous hardcoded-zero behaviour. Wind
+// is held constant across the rollout horizon — an approximation of
+// the OU-process wind applied by the CPU physics step — but realistic
+// for short horizons.
 
 struct MppiDims {
     n_drones: u32,
@@ -67,6 +70,10 @@ struct MppiDims {
 @group(0) @binding(8) var<uniform>             weights:     CostWeights;
 @group(0) @binding(9) var<storage, read>       obstacles:   array<Obstacle, 32>;
 @group(0) @binding(10) var<uniform>            dims:        MppiDims;
+// Per-drone wind force (world frame, Newtons). Layout: flat f32 array,
+// drone `i` occupies indices `[i*4 .. i*4+3]` with `i*4+3` reserved as
+// padding (vec4 alignment).
+@group(0) @binding(11) var<storage, read>      wind_per_drone: array<f32>;
 
 // ---------------------------------------------------------------------------
 // State packing helpers.
@@ -233,8 +240,13 @@ fn rollout_and_cost(@builtin(workgroup_id) wid: vec3<u32>) {
         enemies[state_base + 10u], enemies[state_base + 11u], enemies[state_base + 12u],
     );
 
-    // Per-sample wind is zero for now (see file header).
-    let wind = vec3<f32>(0.0, 0.0, 0.0);
+    // Per-drone wind, uploaded by host before dispatch (see file header).
+    let wind_base = drone_idx * 4u;
+    let wind = vec3<f32>(
+        wind_per_drone[wind_base + 0u],
+        wind_per_drone[wind_base + 1u],
+        wind_per_drone[wind_base + 2u],
+    );
 
     let hover = weights.hover;
     var total_cost: f32 = 0.0;
