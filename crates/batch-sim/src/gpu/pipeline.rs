@@ -24,6 +24,7 @@
 //! | 8       | uniform  | CostWeightsGpu + arena bounds        | read        |
 //! | 9       | storage  | obstacles[MAX_OBSTACLES]             | read        |
 //! | 10      | uniform  | MppiDims                             | read        |
+//! | 11      | storage  | wind_per_drone[N_DRONES × 4]         | read        |
 //!
 //! `N_DRONES = n_battles * 2`, `N = n_samples`, `H = horizon`. All buffers use
 //! f32 (u32 for obstacle kind tag). `MppiDims` is a 32-byte uniform carrying
@@ -303,8 +304,8 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
-/// Build the 11 bind-group layout entries that match the WGSL shader's
-/// `@group(0) @binding(0..10)` declarations.
+/// Build the 12 bind-group layout entries that match the WGSL shader's
+/// `@group(0) @binding(0..11)` declarations.
 ///
 /// This is a pure function — no wgpu device required — so tests can
 /// introspect the entries without needing GPU access. The actual
@@ -326,12 +327,13 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 /// | 8       | `Uniform`                     | `weights_uniform`     |
 /// | 9       | `Storage { read_only: true }` | `obstacles_buffer`    |
 /// | 10      | `Uniform`                     | `dims_uniform`        |
+/// | 11      | `Storage { read_only: true }` | `wind_buffer`         |
 ///
 /// All entries have `visibility = ShaderStages::COMPUTE` and `count = None`.
 /// Note on binding 2: the rollout kernel reads `mean_ctrls`; a future
 /// warm-start kernel will write it. Marked `read_only: true` here to match
 /// the current WGSL declaration in `mppi_rollout.wgsl`.
-pub(crate) fn bind_group_layout_entries() -> [wgpu::BindGroupLayoutEntry; 11] {
+pub(crate) fn bind_group_layout_entries() -> [wgpu::BindGroupLayoutEntry; 12] {
     let storage_read = wgpu::BindingType::Buffer {
         ty: wgpu::BufferBindingType::Storage { read_only: true },
         has_dynamic_offset: false,
@@ -356,17 +358,18 @@ pub(crate) fn bind_group_layout_entries() -> [wgpu::BindGroupLayoutEntry; 11] {
     };
 
     [
-        entry(0, storage_read), // states
-        entry(1, storage_read), // enemies
-        entry(2, storage_read), // mean_ctrls (rollout reads; future warm-start kernel writes)
-        entry(3, storage_read), // noise
-        entry(4, storage_rw),   // costs
-        entry(5, storage_rw),   // ctrls_out
-        entry(6, storage_rw),   // result
-        entry(7, uniform),      // params
-        entry(8, uniform),      // weights
-        entry(9, storage_read), // obstacles
-        entry(10, uniform),     // dims
+        entry(0, storage_read),  // states
+        entry(1, storage_read),  // enemies
+        entry(2, storage_read),  // mean_ctrls (rollout reads; future warm-start kernel writes)
+        entry(3, storage_read),  // noise
+        entry(4, storage_rw),    // costs
+        entry(5, storage_rw),    // ctrls_out
+        entry(6, storage_rw),    // result
+        entry(7, uniform),       // params
+        entry(8, uniform),       // weights
+        entry(9, storage_read),  // obstacles
+        entry(10, uniform),      // dims
+        entry(11, storage_read), // wind per drone (vec3 padded to vec4)
     ]
 }
 
@@ -399,6 +402,10 @@ pub struct GpuBatchMppi {
 
     // Rollout dims uniform (binding 10). 32 bytes of `MppiDims`.
     pub dims_uniform: wgpu::Buffer,
+
+    // Per-drone wind storage buffer (binding 11). `n_drones * 4` f32
+    // (vec3 padded to vec4 for std140 alignment).
+    pub wind_buffer: wgpu::Buffer,
 
     // Bind-group layout + compiled shader + two compute pipelines.
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -455,6 +462,8 @@ impl GpuBatchMppi {
         let weights_uniform_size = std::mem::size_of::<CostWeightsGpu>() as u64;
         let obstacles_size = (MAX_OBSTACLES * std::mem::size_of::<ObstacleGpu>()) as u64;
         let dims_uniform_size = std::mem::size_of::<MppiDims>() as u64;
+        // Per-drone wind: 4 f32 per drone (vec3 + 1 pad for std140 alignment).
+        let wind_size = (n_drones * 4) as u64 * F;
 
         let storage_usage = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
@@ -486,6 +495,9 @@ impl GpuBatchMppi {
         // obstacles are uploaded once and only read by the shader — no COPY_SRC needed
         let obstacles_buffer = make_buf("mppi.obstacles", obstacles_size, obstacles_usage);
         let dims_uniform = make_buf("mppi.dims", dims_uniform_size, uniform_usage);
+        // Wind buffer: host-updated each tick via `set_wind`. STORAGE + COPY_DST.
+        let wind_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let wind_buffer = make_buf("mppi.wind", wind_size, wind_usage);
 
         // Upload static uniforms
         let params_gpu = DroneParamsGpu::from_f32(params);
@@ -514,6 +526,12 @@ impl GpuBatchMppi {
             0.001,
         );
         queue.write_buffer(&dims_uniform, 0, bytemuck::bytes_of(&dims));
+
+        // Initialize wind buffer to zeros. Callers must use `set_wind` to
+        // upload actual per-drone wind forces before dispatch if wind is
+        // desired in the rollout.
+        let zero_wind = vec![0.0f32; n_drones * 4];
+        queue.write_buffer(&wind_buffer, 0, bytemuck::cast_slice(&zero_wind));
 
         // -----------------------------------------------------------------
         // Pipeline construction: bind group layout, shader module, two
@@ -582,6 +600,7 @@ impl GpuBatchMppi {
             weights_uniform,
             obstacles_buffer,
             dims_uniform,
+            wind_buffer,
             bind_group_layout,
             shader_module,
             rollout_pipeline,
@@ -601,6 +620,37 @@ impl GpuBatchMppi {
             .write_buffer(&self.dims_uniform, 0, bytemuck::bytes_of(&dims));
     }
 
+    /// Upload per-drone wind vectors. `winds` must be length `n_drones`,
+    /// each element is a 3-component wind force in Newtons (world frame).
+    /// Internally padded to `vec4` for std140 alignment (the 4th slot is
+    /// unused).
+    ///
+    /// Wind is applied as a constant external force across the entire
+    /// MPPI horizon for each drone — an approximation relative to the
+    /// CPU OU-process wind (which resamples at every physics sub-step),
+    /// but realistic for the short rollout horizons used in practice.
+    ///
+    /// # Panics
+    /// Panics if `winds.len() != n_drones`.
+    pub fn set_wind(&self, winds: &[[f32; 3]]) {
+        assert_eq!(
+            winds.len(),
+            self.n_drones,
+            "winds len {} != n_drones {}",
+            winds.len(),
+            self.n_drones,
+        );
+        let mut padded = vec![0.0f32; self.n_drones * 4];
+        for (i, w) in winds.iter().enumerate() {
+            padded[i * 4] = w[0];
+            padded[i * 4 + 1] = w[1];
+            padded[i * 4 + 2] = w[2];
+            // padded[i*4 + 3] remains 0 (vec4 padding).
+        }
+        self.queue
+            .write_buffer(&self.wind_buffer, 0, bytemuck::cast_slice(&padded));
+    }
+
     /// Run one full MPPI iteration on the GPU: rollout + softmax-weighted mean.
     ///
     /// Inputs: current state per drone, enemy state per drone, warm-start mean
@@ -613,7 +663,7 @@ impl GpuBatchMppi {
     /// Pipeline:
     ///   1. Upload `states`, `enemies`, `mean_ctrls`, `noise` to their
     ///      respective storage buffers.
-    ///   2. Build a `BindGroup` for all 11 bindings.
+    ///   2. Build a `BindGroup` for all 12 bindings.
     ///   3. Dispatch `rollout_pipeline` with `(n_samples, n_drones, 1)`
     ///      workgroups (matches kernel: `wid.x=sample`, `wid.y=drone`).
     ///   4. Dispatch `softmax_pipeline` with `(n_drones, 1, 1)` workgroups
@@ -625,6 +675,11 @@ impl GpuBatchMppi {
     /// `enemies[base+6..=9]`, xyzw layout) MUST be a unit quaternion. The GPU
     /// kernel does NOT renormalize on unpack; if input drift past unit norm,
     /// trajectory integration will drift and GPU/CPU parity will not hold.
+    ///
+    /// Wind is NOT set by this method — callers must use [`Self::set_wind`]
+    /// separately if wind is desired in the rollout. On construction the
+    /// wind buffer is initialized to zero, so an unset buffer behaves like
+    /// the previous wind-hardcoded-to-zero rollout.
     ///
     /// # Panics
     /// Panics if the input slice lengths don't match the configured
@@ -736,6 +791,10 @@ impl GpuBatchMppi {
                 wgpu::BindGroupEntry {
                     binding: 10,
                     resource: self.dims_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: self.wind_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1040,27 +1099,27 @@ mod cpu_ref_tests {
 mod tests {
     use super::*;
 
-    /// The WGSL shader uses exactly 11 bindings (0..=10). If this count
+    /// The WGSL shader uses exactly 12 bindings (0..=11). If this count
     /// ever drifts from the shader, the pipeline will fail to bind.
     #[test]
-    fn test_bind_group_layout_has_11_entries() {
+    fn test_bind_group_layout_has_12_entries() {
         let entries = bind_group_layout_entries();
-        assert_eq!(entries.len(), 11);
+        assert_eq!(entries.len(), 12);
     }
 
-    /// Bindings must be the contiguous range 0..=10 with no gaps or
+    /// Bindings must be the contiguous range 0..=11 with no gaps or
     /// duplicates.
     #[test]
-    fn test_bind_group_layout_bindings_are_0_through_10() {
+    fn test_bind_group_layout_bindings_are_0_through_11() {
         let entries = bind_group_layout_entries();
         let mut bindings: Vec<u32> = entries.iter().map(|e| e.binding).collect();
         bindings.sort();
-        let expected: Vec<u32> = (0u32..=10).collect();
+        let expected: Vec<u32> = (0u32..=11).collect();
         assert_eq!(bindings, expected);
     }
 
     /// Every entry must match the usage pattern the shader expects:
-    /// bindings 0,1,2,3,9 are read-only storage; 4,5,6 are read-write
+    /// bindings 0,1,2,3,9,11 are read-only storage; 4,5,6 are read-write
     /// storage; 7,8,10 are uniforms. All stages COMPUTE, no `count`.
     #[test]
     fn test_bind_group_layout_usage_matches_buffers() {
@@ -1118,7 +1177,7 @@ mod tests {
                 .ty
         };
 
-        for b in [0u32, 1, 2, 3, 9] {
+        for b in [0u32, 1, 2, 3, 9, 11] {
             assert!(
                 is_storage_read(get(b)),
                 "binding {b} must be read-only storage, got {:?}",

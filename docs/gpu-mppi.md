@@ -199,10 +199,15 @@ cargo run -p aces-batch-sim --features gpu --example bench_gpu_vs_cpu --release
 5. **CPU-side warm-start shift.** The GPU returns the full `H`-step optimal
    sequence; the CPU side shifts it left by one and appends a hover control
    before the next tick.
-6. **Wind in GPU path**: `wind_sigma` has no effect on the GPU MPPI *rollout*
-   planner (wind is zero in the compute shaders). The true physics step (applied
-   via CPU RK4 in the orchestrator) still applies OU-process wind noise if
-   `wind_sigma > 0`. Porting wind to the rollout shaders is future work.
+6. **Wind in GPU path**: GPU MPPI rollouts now use per-drone wind vectors
+   uploaded via `GpuBatchMppi::set_wind()` (called by
+   `GpuBatchOrchestrator::pack_and_dispatch_gpu_mppi` each tick with the
+   current OU wind state from `BattleState::wind_{a,b}.force`). Rollouts
+   use constant wind across the horizon (not stochastic OU sampling) — an
+   approximation, but realistic for short horizons. The true physics step
+   still applies OU-process wind noise if `wind_sigma > 0`; the rollout
+   now conditions on the current wind realization so the planner is no
+   longer blind to it.
 
 ## Testing
 
