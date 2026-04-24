@@ -798,20 +798,23 @@ class DroneDogfightEnv(gym.Env):
         elif result.kill_a:
             reward = float(rcfg["kill_reward"])
             terminated = True
-        # Opponent crashes — use per-task override if available
+        # Opponent crashes — use per-task override if available.
+        # Fallback matches batch-sim `RewardConfig::default().opponent_crash_reward`
+        # (5.0) to keep CPU/GPU reward formulas consistent.
         elif result.drone_b_collision or result.drone_b_oob:
-            if "opponent_crash_reward" in rcfg:
-                reward = float(rcfg["opponent_crash_reward"])
-            else:
-                reward = float(rcfg["kill_reward"]) * 0.5
+            reward = float(rcfg.get("opponent_crash_reward", 5.0))
             terminated = True
         else:
             # Shaping rewards
             reward += float(rcfg["survival_bonus"])
 
-            # Lock progress delta
+            # Lock progress delta — only reward positive gains
+            # (batch-sim: `if delta_lock > 0`). Clamping to non-negative
+            # avoids double-penalizing when lock decays (approach-reward
+            # loss already captures retreat/disengagement).
             delta_lock = result.lock_a_progress - self._prev_lock_progress
-            reward += float(rcfg["lock_progress_reward"]) * delta_lock
+            if delta_lock > 0.0:
+                reward += float(rcfg["lock_progress_reward"]) * delta_lock
 
             # Approach reward (distance decrease is positive reward)
             delta_dist = self._prev_distance - result.distance
