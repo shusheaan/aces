@@ -11,6 +11,16 @@ import pytest
 
 
 @pytest.fixture(scope="module")
+def core_available() -> bool:
+    try:
+        import aces._core  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.fixture(scope="module")
 def gpu_available() -> bool:
     try:
         from aces.training.gpu_vec_env import GpuVecEnv
@@ -32,8 +42,10 @@ def _minimal_stages() -> list[dict]:
     ]
 
 
-def test_curriculum_trainer_accepts_gpu_flag_default_off():
+def test_curriculum_trainer_accepts_gpu_flag_default_off(core_available: bool):
     """Flag defaults off; existing CPU path untouched."""
+    if not core_available:
+        pytest.skip("aces._core not built (rebuild with: poetry run maturin develop)")
     from aces.training.curriculum_trainer import CurriculumTrainer
 
     trainer = CurriculumTrainer(
@@ -44,8 +56,10 @@ def test_curriculum_trainer_accepts_gpu_flag_default_off():
     assert trainer._use_gpu_env is False
 
 
-def test_curriculum_trainer_stores_gpu_params():
+def test_curriculum_trainer_stores_gpu_params(core_available: bool):
     """GPU kwargs are stored on the trainer even when the flag is off."""
+    if not core_available:
+        pytest.skip("aces._core not built (rebuild with: poetry run maturin develop)")
     from aces.training.curriculum_trainer import CurriculumTrainer
 
     trainer = CurriculumTrainer(

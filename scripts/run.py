@@ -296,9 +296,24 @@ def main():
             "for every phase."
         ),
     )
-    parser.add_argument("--gpu-mppi-samples", type=int, default=128)
-    parser.add_argument("--gpu-mppi-horizon", type=int, default=15)
-    parser.add_argument("--gpu-noise-std", type=float, default=0.03)
+    parser.add_argument(
+        "--gpu-mppi-samples",
+        type=int,
+        default=128,
+        help="MPPI sample count per drone for GPU env (default: 128)",
+    )
+    parser.add_argument(
+        "--gpu-mppi-horizon",
+        type=int,
+        default=15,
+        help="MPPI rollout horizon for GPU env (default: 15)",
+    )
+    parser.add_argument(
+        "--gpu-noise-std",
+        type=float,
+        default=0.03,
+        help="MPPI noise std for GPU env (default: 0.03)",
+    )
 
     # Evaluate mode
     parser.add_argument("--model-path", default="aces_model")

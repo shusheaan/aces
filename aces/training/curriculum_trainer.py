@@ -224,23 +224,22 @@ class CurriculumTrainer:
 
             from aces.training.gpu_vec_env import GpuVecEnv as _GpuVecEnv
 
-            task_name = getattr(phase_or_task, "task", phase_or_task)
-            opp_name = getattr(phase_or_task, "opponent", None)
-            if isinstance(task_name, str) and task_name not in {
-                "dogfight",
-                "pursuit_linear",
-                "pursuit_evasive",
-            }:
+            if hasattr(phase_or_task, "task") and phase_or_task.task != "dogfight":
                 logger.warning(
-                    "Phase task '%s' requested but GpuVecEnv only supports "
-                    "MPPI opponent dogfight; agent B will be GPU MPPI regardless",
-                    task_name,
+                    "Phase task '%s' requested but GpuVecEnv only implements "
+                    "dogfight MPPI-vs-MPPI semantics; agent B will be GPU MPPI "
+                    "regardless. Curriculum task/opponent specification is "
+                    "ignored.",
+                    phase_or_task.task,
                 )
-            if opp_name is not None and opp_name != "mppi":
+            if hasattr(phase_or_task, "opponent") and phase_or_task.opponent not in (
+                None,
+                "mppi",
+            ):
                 logger.warning(
-                    "Phase opponent '%s' ignored under --use-gpu-env; "
-                    "agent B is GPU MPPI",
-                    opp_name,
+                    "Phase opponent '%s' requested but GpuVecEnv provides MPPI "
+                    "opponent only",
+                    phase_or_task.opponent,
                 )
 
             raw_env = _GpuVecEnv(
@@ -248,7 +247,7 @@ class CurriculumTrainer:
                 mppi_samples=self._gpu_mppi_samples,
                 mppi_horizon=self._gpu_mppi_horizon,
                 noise_std=self._gpu_noise_std,
-                seed=self._seed if self._seed is not None else 42,
+                seed=self._seed if self._seed is not None else 0,
             )
             return VecNormalize(
                 raw_env, norm_obs=True, norm_reward=False, clip_obs=10.0
