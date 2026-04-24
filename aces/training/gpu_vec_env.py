@@ -12,7 +12,7 @@ by MPPI. This wrapper:
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 from gymnasium.spaces import Box
@@ -30,6 +30,23 @@ except ImportError:
 # Crazyflie default — must match `DroneParams::crazyflie().max_thrust`
 # (see configs/drone.toml: max_motor_thrust = 0.15).
 MAX_THRUST_PER_MOTOR = 0.15  # N
+
+
+def denormalize_action(actions: np.ndarray) -> np.ndarray:
+    """Denormalize SB3 [-1, 1] action space to motor thrusts in [0, MAX_THRUST_PER_MOTOR].
+
+    Uses the affine map: motor = (action + 1) / 2 * MAX_THRUST_PER_MOTOR, clamped.
+    Out-of-range inputs are clipped to the motor range.
+
+    Args:
+        actions: float array of any shape, with trailing dim typically 4 (motors).
+
+    Returns:
+        float32 array of same shape, each element in [0, MAX_THRUST_PER_MOTOR].
+    """
+    raw = (actions.astype(np.float32) + 1.0) * 0.5 * MAX_THRUST_PER_MOTOR
+    clipped = np.clip(raw, 0.0, MAX_THRUST_PER_MOTOR).astype(np.float32)
+    return cast(np.ndarray, clipped)
 
 
 class GpuVecEnv(VecEnv):
@@ -102,9 +119,7 @@ class GpuVecEnv(VecEnv):
         if self._last_actions is None:
             raise RuntimeError("step_wait called without prior step_async")
 
-        # Denormalize [-1, 1] -> [0, MAX_THRUST_PER_MOTOR]
-        raw = (self._last_actions.astype(np.float32) + 1.0) * 0.5 * MAX_THRUST_PER_MOTOR
-        raw = np.clip(raw, 0.0, MAX_THRUST_PER_MOTOR).astype(np.float32)
+        raw = denormalize_action(self._last_actions)
 
         obs, rewards, dones, infos = self._rust.step_with_agent_a(raw)
         self._last_actions = None
