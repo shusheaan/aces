@@ -91,7 +91,9 @@ class GpuVecEnv(VecEnv):
         # side is seeded at construction and doesn't accept per-reset seeds.
         del seed, options
         obs: np.ndarray = self._rust.reset()
-        return obs
+        # Rust side returns float32; explicit dtype makes the contract visible
+        # and resilient to future Rust-side changes.
+        return obs.astype(np.float32, copy=False)
 
     def step_async(self, actions: np.ndarray) -> None:
         self._last_actions = actions

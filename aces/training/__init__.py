@@ -27,7 +27,7 @@ from aces.training.curriculum_trainer import CurriculumTrainer
 
 try:
     from aces.training.gpu_vec_env import GpuVecEnv
-except (ImportError, RuntimeError):
+except ImportError:
     GpuVecEnv = None  # type: ignore[assignment,misc]
 
 __all__ = [
