@@ -27,16 +27,31 @@ except ImportError:
     _RustGpuVecEnv = None
     _GPU_AVAILABLE = False
 
-# Crazyflie default — must match `DroneParams::crazyflie().max_thrust`
-# (see configs/drone.toml: max_motor_thrust = 0.15).
+# Crazyflie default — must match `DroneParams::crazyflie()` used by the GPU
+# orchestrator (see crates/batch-sim/src/f32_dynamics.rs::crazyflie and
+# configs/drone.toml: mass = 0.027 kg, max_motor_thrust = 0.15 N, gravity = 9.81 m/s^2).
 MAX_THRUST_PER_MOTOR = 0.15  # N
+_MASS = 0.027  # kg
+_GRAVITY = 9.81  # m/s^2
+# Hover thrust per motor: mass * g / 4 — must match
+# `DroneParams::hover_thrust()` on the Rust side.
+HOVER_THRUST_PER_MOTOR = _MASS * _GRAVITY / 4.0  # N
 
 
 def denormalize_action(actions: np.ndarray) -> np.ndarray:
     """Denormalize SB3 [-1, 1] action space to motor thrusts in [0, MAX_THRUST_PER_MOTOR].
 
-    Uses the affine map: motor = (action + 1) / 2 * MAX_THRUST_PER_MOTOR, clamped.
-    Out-of-range inputs are clipped to the motor range.
+    Uses the hover-centered affine map matching the CPU env
+    (`DroneDogfightEnv._map_action`):
+
+        motor = hover + action * (max_thrust - hover), clamped to [0, max_thrust]
+
+    Here ``action = 0`` corresponds to hovering and ``action = +1`` to full
+    throttle. ``action = -1`` lands below zero thrust and is clipped to 0.
+
+    Keeping this formula in sync with the CPU path is critical for
+    reproducibility: an agent trained against one env must behave identically
+    when deployed against the other.
 
     Args:
         actions: float array of any shape, with trailing dim typically 4 (motors).
@@ -44,7 +59,8 @@ def denormalize_action(actions: np.ndarray) -> np.ndarray:
     Returns:
         float32 array of same shape, each element in [0, MAX_THRUST_PER_MOTOR].
     """
-    raw = (actions.astype(np.float32) + 1.0) * 0.5 * MAX_THRUST_PER_MOTOR
+    a = actions.astype(np.float32)
+    raw = HOVER_THRUST_PER_MOTOR + a * (MAX_THRUST_PER_MOTOR - HOVER_THRUST_PER_MOTOR)
     clipped = np.clip(raw, 0.0, MAX_THRUST_PER_MOTOR).astype(np.float32)
     return cast(np.ndarray, clipped)
 
