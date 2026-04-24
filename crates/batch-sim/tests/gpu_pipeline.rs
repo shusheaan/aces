@@ -7,12 +7,13 @@
 
 #![cfg(feature = "gpu")]
 
+use aces_batch_sim::f32_cost::CostWeightsF32;
 use aces_batch_sim::f32_dynamics::DroneParamsF32;
 use aces_batch_sim::f32_sdf::{ArenaF32, ObstacleF32};
 use aces_batch_sim::gpu::adapter::probe_gpu;
 use aces_batch_sim::gpu::pipeline::{
-    CostWeightsGpu, DroneParamsGpu, GpuBatchMppi, GpuInitError, MppiDims, ObstacleGpu,
-    MAX_OBSTACLES,
+    compute_batch_actions_cpu_reference, CostWeightsGpu, DroneParamsGpu, GpuBatchMppi,
+    GpuInitError, MppiDims, ObstacleGpu, MAX_OBSTACLES,
 };
 use nalgebra::Vector3;
 
@@ -407,6 +408,172 @@ fn test_drone_params_gpu_layout() {
 
     assert_eq!(std::mem::size_of::<ObstacleGpu>(), 48);
     assert_eq!(std::mem::size_of::<ObstacleGpu>() % 16, 0);
+}
+
+// ----- GPU vs CPU-reference end-to-end parity -----
+//
+// Keystone validation: running the same inputs through both the GPU
+// pipeline and a pure-f32 CPU reference (see
+// `pipeline::compute_batch_actions_cpu_reference`) must produce numerically
+// equivalent outputs (up to f32 accumulation noise). If this test passes,
+// the entire GPU MPPI stack — RK4 dynamics, SDF, cost functions, softmax
+// reduction, buffer layout, and dispatch — is trustworthy.
+#[test]
+fn test_gpu_matches_cpu_reference_parity() {
+    if !gpu_available_or_skip("test_gpu_matches_cpu_reference_parity") {
+        return;
+    }
+
+    // Small config for fast turnaround: 4 drones (2 battles), 32 samples,
+    // horizon 10. All reductions / accumulations remain deterministic on a
+    // given backend.
+    let n_drones: usize = 4;
+    let n_samples: usize = 32;
+    let horizon: usize = 10;
+
+    let params_f32 = DroneParamsF32::crazyflie();
+    let arena_f32 = warehouse_arena_f32();
+
+    // GPU cost weights must match the CPU cost weights value-for-value.
+    // `default_weights()` sets hover = 0.0 (see its definition at top of
+    // this file), and these five weights/safe-distance values.
+    let gpu_weights = default_weights();
+    let cost_weights = CostWeightsF32 {
+        w_dist: gpu_weights.w_dist,
+        w_face: gpu_weights.w_face,
+        w_ctrl: gpu_weights.w_ctrl,
+        w_obs: gpu_weights.w_obs,
+        d_safe: gpu_weights.d_safe,
+    };
+    // The GPU cost kernels read `weights.hover` from the CostWeightsGpu
+    // uniform and use that as the hover_thrust value. For parity the CPU
+    // reference must pass the same numeric value.
+    let hover_for_cost = gpu_weights.hover;
+
+    // Seeded RNG for deterministic inputs.
+    use rand::rngs::SmallRng;
+    use rand::Rng;
+    use rand::SeedableRng;
+    let mut rng = SmallRng::seed_from_u64(42);
+
+    // Two-pass init to avoid a state-vs-enemy bootstrap aliasing issue:
+    // first fill `states` for all drones, then fill `enemies` by copying
+    // the paired drone's state. (Drone d's enemy is drone d XOR 1.)
+    let mut states = vec![0.0f32; n_drones * 13];
+    for d in 0..n_drones {
+        let base = d * 13;
+        // Inside arena (10x10x3), avoiding pillars at corners and center.
+        states[base] = rng.gen_range(2.0f32..8.0);
+        states[base + 1] = rng.gen_range(2.0f32..8.0);
+        states[base + 2] = rng.gen_range(1.0f32..2.5);
+        // Velocity (3..6) = 0; identity quaternion (xyzw) at 6..10.
+        states[base + 9] = 1.0;
+        // Angular velocity (10..13) = 0.
+    }
+    let mut enemies = vec![0.0f32; n_drones * 13];
+    for d in 0..n_drones {
+        let base = d * 13;
+        let enemy_d = d ^ 1;
+        let enemy_base = enemy_d * 13;
+        enemies[base..base + 13].copy_from_slice(&states[enemy_base..enemy_base + 13]);
+    }
+
+    // Warm-start mean control: hover thrust everywhere. We use the
+    // params-based hover (mass*g/4) for the warm-start, independent of
+    // the hover value passed into the cost function — this is a realistic
+    // MPPI setup.
+    let hover_ctrl = params_f32.hover_thrust();
+    let mean_ctrls = vec![hover_ctrl; n_drones * horizon * 4];
+
+    // Noise: small normal perturbations. Keep std small so the clamp
+    // branch rarely fires (would introduce extra f32 drift between GPU
+    // and CPU implementations of `clamp`).
+    let noise_std = 0.01f32;
+    let noise_len = n_drones * n_samples * horizon * 4;
+    let mut noise = Vec::with_capacity(noise_len);
+    use rand_distr::{Distribution, Normal};
+    let normal = Normal::new(0.0f32, noise_std).unwrap();
+    for _ in 0..noise_len {
+        noise.push(normal.sample(&mut rng));
+    }
+
+    // Build the GPU pipeline. `GpuBatchMppi::new` initialises the dims
+    // uniform with substeps=10, dt_sim=0.001, temperature=10.0 — we mirror
+    // exactly those values into the `MppiDims` passed to the CPU reference.
+    let pipeline = GpuBatchMppi::new(
+        n_drones,
+        n_samples,
+        horizon,
+        &params_f32,
+        gpu_weights,
+        &arena_f32,
+    )
+    .expect("pipeline construction");
+
+    let dims = MppiDims::new(
+        n_drones as u32,
+        n_samples as u32,
+        horizon as u32,
+        10,
+        arena_f32.obstacles.len() as u32,
+        0.001,
+    );
+    // `MppiDims::new` defaults temperature to 10.0, matching the value
+    // `GpuBatchMppi::new` uploaded into the uniform.
+    assert_eq!(
+        dims.temperature, 10.0,
+        "CPU-reference dims.temperature must match GPU default"
+    );
+
+    // Run both implementations.
+    let gpu_out = pipeline.compute_batch_actions(&states, &enemies, &mean_ctrls, &noise);
+    let cpu_out = compute_batch_actions_cpu_reference(
+        &params_f32,
+        &arena_f32,
+        &cost_weights,
+        hover_for_cost,
+        dims,
+        &states,
+        &enemies,
+        &mean_ctrls,
+        &noise,
+    );
+
+    assert_eq!(
+        gpu_out.len(),
+        cpu_out.len(),
+        "GPU/CPU output lengths differ"
+    );
+
+    // Compare element-wise.
+    let mut max_diff = 0.0f32;
+    let mut max_diff_idx = 0usize;
+    for i in 0..gpu_out.len() {
+        let d = (gpu_out[i] - cpu_out[i]).abs();
+        if d > max_diff {
+            max_diff = d;
+            max_diff_idx = i;
+        }
+    }
+
+    // Tolerance: f32 accumulation over 10*10=100 RK4 steps per rollout,
+    // then softmax reduction across 32 samples. Empirically prior parity
+    // tests on the same-shaped pipelines land near 1e-3; 1e-2 gives a
+    // safe margin for backend variation.
+    let tol = 1e-2f32;
+    if max_diff >= tol {
+        // Print first 5 entries side-by-side to aid debugging.
+        eprintln!("[parity] max abs diff = {max_diff:.6e} at idx {max_diff_idx}");
+        for i in 0..5.min(gpu_out.len()) {
+            eprintln!("  i={i}: gpu={:.6e} cpu={:.6e}", gpu_out[i], cpu_out[i]);
+        }
+    }
+    assert!(
+        max_diff < tol,
+        "GPU-CPU parity failed: max abs diff = {max_diff:.6e} at idx {max_diff_idx}"
+    );
+
+    eprintln!("[parity] max abs diff = {max_diff:.6e}");
 }
 
 #[test]
