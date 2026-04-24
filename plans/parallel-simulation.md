@@ -2,30 +2,77 @@
 
 Status: **Phase 1, Phase 2, Phase 3 complete — Phase 4 pending**
 Created: 2026-04-23
-Last updated: 2026-04-23 (Phase 2 + Phase 3 merged)
+Last updated: 2026-04-24 (Phase 2 + Phase 3 landed + 7 consistency audits)
 
-User-facing guide for the GPU MPPI pipeline: [`docs/gpu-mppi.md`](../docs/gpu-mppi.md).
+User-facing guide: [`docs/gpu-mppi.md`](../docs/gpu-mppi.md).
+Session archive: [`docs/2026-04-24-session-archive.md`](../docs/2026-04-24-session-archive.md).
 
 ---
 
-## Status (as of 2026-04-23)
+## Status (as of 2026-04-24)
 
 - **Phase 1 — Rayon CPU batch**: DONE (commit `c6b1d22` "add batch-sim crate for parallel battle simulation").
-- **Phase 2 — WGPU batch MPPI**: DONE. Landed as a series of merges from
-  `feature/f32-rk4-validation` (`b6ceb84`) through `feature/gpu-cpu-parity`
-  (`52836de`) and `feature/gpu-bench` (`b0f1082`). GPU pipeline lives in
-  `crates/batch-sim/src/gpu/` with WGSL shaders in `.../gpu/shaders/`.
-- **Phase 3 — PyO3 integration**: DONE. Landed across `feature/pyo3-gpu`
-  (`4278b9e`), `feature/orchestrator-gpu-opt` (`dc7a8cd`), `feature/gpu-vec-env`
-  (`bb6aa96`), `feature/gpu-ppo-mode` (`4b4d70c`), `feature/gpu-sb3-wrapper`
-  (`98ba353`), `feature/gpu-ppo-smoke` (`1be11aa`), and finally
-  `feature/curriculum-gpu-opt` (`fef1050`) which wires `--use-gpu-env` into the
-  curriculum trainer.
+- **Phase 2 — WGPU batch MPPI**: DONE. Landed as 11 slices from
+  `feature/f32-rk4-validation` (`b6ceb84`) through `feature/gpu-bench`
+  (`b0f1082`). GPU pipeline lives in `crates/batch-sim/src/gpu/` with WGSL
+  shaders in `.../gpu/shaders/`.
+- **Phase 3 — PyO3 integration**: DONE. Landed as 13 slices from
+  `feature/pyo3-gpu` (`4278b9e`) through `feature/curriculum-gpu-opt`
+  (`fef1050`) which wires `--use-gpu-env` into the curriculum trainer, plus
+  follow-up docs / utilities (`feature/gpu-docs` `0de67a6`,
+  `feature/training-bench` `c253ac6`, `feature/setup-check` `86728e9`,
+  `feature/obs-describe` `652cd30`, `feature/test-conftest` `9f40bef`,
+  `feature/denorm-unit-test` `a4f4bd8`, `feature/gpu-wind` `4a541dd`).
+- **Post-Phase-3 consistency audits**: 7 audits landed comparing CPU env
+  vs batch-sim vs GPU vs Bevy, each finding at least one real divergence
+  (`feature/action-consistency` `41aeb05`, `feature/reward-consistency`
+  `ee83fd1`, `feature/obs-consistency` `057e5d4`,
+  `feature/fix-test-and-game` `b1f403a`, `feature/spawn-audit` `6141a8a`,
+  `feature/rules-toml-plumb` `4c6678c`, `feature/wind-plumb` `9a6b716`).
+  Full rundown in the session archive (Part 2). Three reward-path
+  divergences remain — see archive Part 3.
 - **Phase 4 — Full physics on GPU**: NOT STARTED. Section below is the
   original design sketch and is preserved for reference.
 
-See [`docs/gpu-mppi.md`](../docs/gpu-mppi.md) for the end-user guide
-(requirements, build, examples, caveats, status table).
+### Full slice index (in chronological merge order)
+
+| #  | Phase | Slice                                          | Landed as                         |
+|----|-------|------------------------------------------------|-----------------------------------|
+|  1 | P2    | f32 RK4 reference + parity tests               | `feature/f32-rk4-validation` (`b6ceb84`) |
+|  2 | P2    | f32 Arena / Obstacle SDF                       | `feature/f32-sdf` (`3cfe38a`)           |
+|  3 | P2    | GpuBatchMppi buffer allocation                 | `feature/gpu-pipeline-skeleton` (`9d88db1`) |
+|  4 | P2    | f32 pursuit / evasion cost                     | `feature/f32-cost` (`3c2f41d`)           |
+|  5 | P2    | WGSL helpers + naga validation                 | `feature/wgsl-helpers` (`06b4e26`)       |
+|  6 | P2    | `rollout_and_cost` kernel                      | `feature/mppi-rollout-kernel` (`31b87f9`) |
+|  7 | P2    | `softmax_reduce` kernel                        | `feature/mppi-softmax-kernel` (`e6c8072`) |
+|  8 | P2    | BindGroupLayout + 2 ComputePipelines           | `feature/gpu-pipelines` (`dce9617`)     |
+|  9 | P2    | `compute_batch_actions()` dispatch             | `feature/gpu-dispatch` (`6a3e250`)      |
+| 10 | P2    | CPU reference + parity test                    | `feature/gpu-cpu-parity` (`52836de`)    |
+| 11 | P2    | `bench_gpu_vs_cpu` example                     | `feature/gpu-bench` (`b0f1082`)         |
+| 12 | P3    | PyO3 `PyGpuBatchMppi`                          | `feature/pyo3-gpu` (`4278b9e`)          |
+| 13 | P3    | `GpuBatchOrchestrator` end-to-end              | `feature/orchestrator-gpu-opt` (`dc7a8cd`) |
+| 14 | P3    | PyO3 `GpuVecEnv` + reset                       | `feature/gpu-vec-env` (`bb6aa96`)       |
+| 15 | P3    | `step_with_agent_a_actions`                    | `feature/gpu-ppo-mode` (`4b4d70c`)      |
+| 16 | P3    | SB3-compatible Python GpuVecEnv                | `feature/gpu-sb3-wrapper` (`98ba353`)   |
+| 17 | P3    | GPU PPO end-to-end smoke                       | `feature/gpu-ppo-smoke` (`1be11aa`)     |
+| 18 | P3    | `--use-gpu-env` on CurriculumTrainer           | `feature/curriculum-gpu-opt` (`fef1050`) |
+| 19 | P3    | GPU MPPI user guide                            | `feature/gpu-docs` (`0de67a6`)          |
+| 20 | P3    | PPO training throughput benchmark              | `feature/training-bench` (`c253ac6`)    |
+| 21 | P3    | `denormalize_action` pure fn                   | `feature/denorm-unit-test` (`a4f4bd8`)  |
+| 22 | P3    | conftest.py fixtures                           | `feature/test-conftest` (`9f40bef`)     |
+| 23 | P3    | `check_gpu_setup.sh`                           | `feature/setup-check` (`86728e9`)       |
+| 24 | P3    | `obs_layout.describe_obs`                      | `feature/obs-describe` (`652cd30`)      |
+| 25 | P3    | Per-drone wind in rollout (binding 11)         | `feature/gpu-wind` (`4a541dd`)          |
+| 26 | Audit | Action denormalization alignment               | `feature/action-consistency` (`41aeb05`) |
+| 27 | Audit | Reward formula alignment                       | `feature/reward-consistency` (`ee83fd1`) |
+| 28 | Audit | Obs[15] combined SDF                           | `feature/obs-consistency` (`057e5d4`)   |
+| 29 | Audit | Obs test + Bevy game obstacle_sdf              | `feature/fix-test-and-game` (`b1f403a`) |
+| 30 | Audit | SpawnMode + max_steps                          | `feature/spawn-audit` (`6141a8a`)       |
+| 31 | Audit | reward_config TOML plumbing                    | `feature/rules-toml-plumb` (`4c6678c`)  |
+| 32 | Audit | wind_sigma / wind_theta TOML plumbing          | `feature/wind-plumb` (`9a6b716`)        |
+
+See the session archive for per-audit bug details and the list of
+remaining divergences.
 
 ---
 
