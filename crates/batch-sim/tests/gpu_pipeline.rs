@@ -259,6 +259,119 @@ fn test_pipeline_rejects_too_many_obstacles() {
     }
 }
 
+// ----- compute_batch_actions dispatch tests -----
+
+/// Tiny helper: build a pipeline with the warehouse arena and default weights.
+fn make_pipeline(n_drones: usize, n_samples: usize, horizon: usize) -> GpuBatchMppi {
+    let params = DroneParamsF32::crazyflie();
+    let arena = warehouse_arena_f32();
+    let weights = default_weights();
+    GpuBatchMppi::new(n_drones, n_samples, horizon, &params, weights, &arena)
+        .expect("pipeline construction")
+}
+
+#[test]
+fn test_compute_batch_actions_returns_correct_shape() {
+    if !gpu_available_or_skip("test_compute_batch_actions_returns_correct_shape") {
+        return;
+    }
+    let n_drones = 4usize;
+    let n_samples = 64usize;
+    let horizon = 10usize;
+    let pipeline = make_pipeline(n_drones, n_samples, horizon);
+
+    let states = vec![0.0f32; n_drones * 13];
+    let enemies = vec![0.0f32; n_drones * 13];
+    let mean_ctrls = vec![0.0f32; n_drones * horizon * 4];
+    let noise = vec![0.0f32; n_drones * n_samples * horizon * 4];
+
+    let out = pipeline.compute_batch_actions(&states, &enemies, &mean_ctrls, &noise);
+    assert_eq!(out.len(), n_drones * horizon * 4);
+    assert_eq!(out.len(), 160);
+}
+
+#[test]
+fn test_compute_batch_actions_produces_finite_output() {
+    if !gpu_available_or_skip("test_compute_batch_actions_produces_finite_output") {
+        return;
+    }
+    let n_drones = 4usize;
+    let n_samples = 64usize;
+    let horizon = 10usize;
+    let pipeline = make_pipeline(n_drones, n_samples, horizon);
+
+    // States: drones at alternating corners. Identity quaternion is (0,0,0,1).
+    // State layout per drone (13 floats): pos3, vel3, quat_xyzw4, angvel3.
+    let mut states = vec![0.0f32; n_drones * 13];
+    let positions = [
+        [1.0f32, 1.0, 1.5],
+        [9.0, 9.0, 1.5],
+        [1.0, 9.0, 1.5],
+        [9.0, 1.0, 1.5],
+    ];
+    for (d, pos) in positions.iter().enumerate().take(n_drones) {
+        let base = d * 13;
+        states[base] = pos[0];
+        states[base + 1] = pos[1];
+        states[base + 2] = pos[2];
+        // vel = 0, quat = (0,0,0,1)
+        states[base + 9] = 1.0; // quat w
+                                // angvel = 0
+    }
+
+    // Enemies: pair (0,1) and (2,3).
+    let mut enemies = vec![0.0f32; n_drones * 13];
+    let pairs = [(0usize, 1usize), (1, 0), (2, 3), (3, 2)];
+    for (d, enemy_d) in pairs.iter().take(n_drones) {
+        let src = enemy_d * 13;
+        let dst = d * 13;
+        enemies[dst..dst + 13].copy_from_slice(&states[src..src + 13]);
+    }
+
+    // Hover thrust per motor = mass * g / 4.
+    let hover_thrust = 0.027 * 9.81 / 4.0;
+    let mean_ctrls = vec![hover_thrust; n_drones * horizon * 4];
+    let noise = vec![0.0f32; n_drones * n_samples * horizon * 4];
+
+    let out = pipeline.compute_batch_actions(&states, &enemies, &mean_ctrls, &noise);
+    assert_eq!(out.len(), n_drones * horizon * 4);
+
+    for (i, v) in out.iter().enumerate() {
+        assert!(v.is_finite(), "output[{i}] = {v} not finite");
+    }
+
+    // With zero noise, every sample has identical cost -> uniform softmax
+    // weights, so the softmax-weighted mean recovers the input mean_ctrls.
+    for (i, (o, m)) in out.iter().zip(mean_ctrls.iter()).enumerate() {
+        let diff = (o - m).abs();
+        assert!(
+            diff < 1e-3,
+            "output[{i}] = {o}, expected ~{m} (diff {diff})"
+        );
+    }
+}
+
+#[test]
+fn test_compute_batch_actions_panics_on_wrong_input_length() {
+    if !gpu_available_or_skip("test_compute_batch_actions_panics_on_wrong_input_length") {
+        return;
+    }
+    let n_drones = 4usize;
+    let n_samples = 64usize;
+    let horizon = 10usize;
+    let pipeline = make_pipeline(n_drones, n_samples, horizon);
+
+    let bad_states = vec![0.0f32; 7]; // wrong length
+    let enemies = vec![0.0f32; n_drones * 13];
+    let mean_ctrls = vec![0.0f32; n_drones * horizon * 4];
+    let noise = vec![0.0f32; n_drones * n_samples * horizon * 4];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pipeline.compute_batch_actions(&bad_states, &enemies, &mean_ctrls, &noise);
+    }));
+    assert!(result.is_err(), "expected panic on wrong states length");
+}
+
 // ----- Pure struct-layout checks (no GPU needed) -----
 
 #[test]
