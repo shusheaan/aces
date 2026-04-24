@@ -378,14 +378,18 @@ See `plans/parallel-simulation.md` for full details.
 - Nested Rayon: outer (battles) × inner (MPPI samples)
 - 14 unit tests passing, benchmark shows 3.2K steps/s at 64 battles
 
-### Phase 2 (Pending): WGPU compute shaders for MPPI rollout
-- Single GPU dispatch for all drones' MPPI
+### Phase 2 (DONE 2026-04-24): WGPU compute shaders for MPPI rollout
+- Single GPU dispatch for all drones' MPPI (12 bindings, 2 kernels)
 - f32 WGSL shader porting RK4 + SDF + cost + softmax reduction
 - Feature-gated: `--features gpu`
+- User guide: `docs/gpu-mppi.md`
 
-### Phase 3 (Pending): PyO3 BatchVecEnv for SB3 integration
+### Phase 3 (DONE 2026-04-24): PyO3 GpuVecEnv for SB3 integration
 - `step_with_agent_a_actions()` — PPO agent vs MPPI opponent
-- Replace SubprocVecEnv in curriculum trainer
+- `aces._core.GpuVecEnv` PyO3 class + `aces.training.GpuVecEnv` SB3 wrapper
+- `--use-gpu-env` opt-in on `CurriculumTrainer`
+- Known limitation: only MPPI-vs-MPPI opponent semantics supported (other
+  phases warn + fall back)
 
 ### Phase 4 (Pending): Full GPU physics pipeline
 - All simulation on GPU, CPU only does PPO + episode management
@@ -412,3 +416,49 @@ See `plans/parallel-simulation.md` for full details.
 5. **batch-sim doesn't support belief state**: BattleState has no EKF/PF, so observation
    fields 19-20 (belief_uncertainty, time_since_seen) are always 0. Phase 3 curriculum
    needs this for realistic search_pursuit training.
+
+### 2026-04-24 updates
+
+See [`docs/2026-04-24-session-archive.md`](../docs/2026-04-24-session-archive.md)
+for full detail. Summary of what changed in the seven consistency audits:
+
+6. **GpuVecEnv now plumbs rules.toml** (Audit 6 / `feature/rules-toml-plumb`).
+   Was: the GPU training path silently used `RewardConfig::default()` — any
+   `[reward]` tuning in `rules.toml` was ignored. Now: GpuVecEnv loads the
+   file and passes it through to Rust.
+
+7. **GpuVecEnv now plumbs wind config** (Audit 7 / `feature/wind-plumb`).
+   Was: `wind_sigma` defaulted to a literal; `wind_theta` was hardcoded
+   `2.0`. Now: both read from `rules.toml [noise]`.
+
+8. **Spawn initialization fixed** (Audit 5 / `feature/spawn-audit`).
+   Introduced `SpawnMode::{FixedFromArena, FixedWithJitter, Random}`.
+   Default matches CPU env (fixed + small jitter); `Random` available for
+   domain randomization in later phases. `BatchConfig::max_steps` now
+   honoured (was hardcoded 1000).
+
+9. **Reward-formula divergences fixed** (Audits 2-4). Three remaining:
+   - Terminal priority when `kill_a && collision_a` fire same step (Rust:
+     kill-first, CPU: collision-first).
+   - Timeout / truncation reward (Rust short-circuits to 0; CPU runs
+     shaping).
+   - Per-task reward overrides (`[task_reward_overrides.*]`) not plumbed
+     through GpuVecEnv — a future DD follow-up, analogous to Audit 6 but
+     with a per-phase merge layer.
+
+10. **Action denormalization aligned** (Audit 1 / `feature/action-consistency`).
+    GPU VecEnv now uses hover-centered convention
+    `motor = hover + a * (max - hover)` to match CPU env. The previous
+    symmetric-scaling formula caused ~12 % thrust mismatch at `a = 0`.
+
+11. **Observation slot [15] aligned** (Audits 3, 4). CPU env + Bevy game
+    now both use combined `arena.sdf() = min(boundary, obstacle)` to match
+    batch-sim. Previously CPU returned obstacle-only SDF, missing
+    wall-proximity signal.
+
+12. **batch-sim still misses CPU noise features**: `obs_noise_std`, motor
+    delay (first-order), motor noise + bias, IMU random-walk bias —
+    `aces/env/dogfight.py` applies these via `crates/sim-core/src/{noise,
+    actuator, imu_bias}.rs`, but `crates/batch-sim/` does not. Would need
+    new crate code, not just config plumbing. Impacts phases 3-5 where
+    noise is part of the curriculum.

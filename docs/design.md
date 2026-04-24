@@ -4,6 +4,47 @@
 
 Two drones fight in a 10m x 10m x 3m arena with obstacles. Each has a forward-facing camera. Lock-on = keep opponent in FOV cone at close range for 1.5 seconds. Whoever locks on first wins.
 
+See also: [`docs/2026-04-24-session-archive.md`](2026-04-24-session-archive.md)
+for detailed GPU MPPI architecture and the seven CPU/GPU consistency audits
+landed on 2026-04-23/24. See also [`docs/gpu-mppi.md`](gpu-mppi.md) for the
+user-facing GPU MPPI guide.
+
+---
+
+## Session 2026-04-24 updates
+
+- **GPU MPPI (Phase 2 + 3) is shipped.** Full WGSL compute-shader MPPI
+  planner + SB3-compatible `GpuVecEnv` + `CurriculumTrainer --use-gpu-env`
+  opt-in. Architecture: 12 GPU bindings, two compute kernels
+  (`rollout_and_cost` + `softmax_reduce`). See the archive doc Part 1 and
+  `docs/gpu-mppi.md`.
+- **CPU vs batch-sim reward alignment.** `aces/env/dogfight.py` reward now
+  matches `crates/batch-sim/src/reward.rs` canonical formula (lock-delta
+  clamp to `[0, ∞)`, opponent-crash fallback). Three minor terminal-ordering
+  / truncation divergences remain (archive doc Part 3).
+- **CPU vs batch-sim observation alignment.** `obs[15]` (nearest-obstacle
+  SDF) now uses combined `arena.sdf()` = `min(boundary_sdf, obstacle_sdf)`
+  in both CPU env and Bevy game — matches batch-sim.
+- **CPU vs GPU action alignment.** `GpuVecEnv.denormalize_action` was
+  rewritten to the hover-centered convention
+  `motor = hover + a * (max_thrust - hover)`, matching the CPU env. The
+  previous symmetric-scaling formula caused ~12 % thrust error at `a = 0`.
+- **Spawn initialization consolidated.** New `SpawnMode` enum
+  (`FixedFromArena` / `FixedWithJitter` / `Random`) replaces the old
+  random-XY reset in `BattleState`. Default `FixedWithJitter` matches CPU
+  env; `Random` preserved for domain randomization.
+- **Config plumbing fixed.** `rules.toml [reward]` and `[noise]
+  wind_sigma / wind_theta` now actually reach `GpuVecEnv` — they were being
+  silently defaulted before. `wind_theta` was hardcoded `2.0` in
+  `PyGpuVecEnv::new`.
+- **New Python module `aces/env/obs_layout.py`**: observation-index
+  constants + `describe_obs(obs)` debug helper. Used by consistency tests.
+- **New Python module `aces/training/gpu_vec_env.py`**: SB3-compatible
+  VecEnv wrapper around `aces._core.GpuVecEnv`.
+- **Batch-sim f32 reference files** (`crates/batch-sim/src/f32_*.rs`): CPU
+  reference implementations in f32 used as the parity baseline for the GPU
+  kernels.
+
 ---
 
 ## 1. Core Design Decisions
@@ -291,7 +332,7 @@ aces/
 │   ├── install-hooks.sh             #   Git pre-commit hook installer
 │   └── pre-commit.sh               #   Lint + test checks
 │
-├── tests/                           # ── 142 tests (57 Rust + 85 Python) ──
+├── tests/                           # ── ~336 tests (~149 Rust + ~187 Python across 25 modules) ──
 │   ├── test_config.py
 │   ├── test_curriculum.py
 │   ├── test_dynamics.py
@@ -305,7 +346,9 @@ aces/
     └── design.md                    #   ← This file
 ```
 
-**Total: ~30 Rust source files + 10 Python modules, 142 tests.**
+**Total: ~30 Rust source files + 10 Python modules; ~149 Rust
+`#[test]` + ~187 Python test functions across 25 files (see archive
+2026-04-24 for current GPU + batch-sim additions).**
 
 ---
 
@@ -618,8 +661,9 @@ poetry run maturin develop            # Rust extension (debug)
 poetry run maturin develop --release  # Rust extension (optimized)
 
 # Test
-cargo test                            # 57 Rust tests
-pytest tests/ -v                      # 85 Python tests
+cargo test --workspace                # Rust tests (all crates)
+cargo test -p aces-batch-sim --features gpu   # GPU-feature tests (if GPU avail)
+pytest tests/ -v                      # Python tests (GPU tests auto-skip if no gpu feature)
 
 # Run (MPPI vs MPPI)
 python scripts/run.py                                # default
