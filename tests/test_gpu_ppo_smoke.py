@@ -39,13 +39,14 @@ def test_ppo_smoke_runs(gpu_available):
     if not gpu_available:
         pytest.skip("GpuVecEnv/GPU not available")
 
-    # Minimal config: 4 envs × 32 timesteps should complete in seconds
+    # n_steps * n_envs = 32 * 4 = 128 rollout buffer; 256 timesteps = 2
+    # rollout iterations so PPO actually triggers gradient updates.
     result = subprocess.run(
         [
             sys.executable,
             str(SMOKE_SCRIPT),
             "--timesteps",
-            "64",
+            "256",
             "--n-envs",
             "4",
             "--mppi-samples",

@@ -19,6 +19,8 @@ import sys
 import time
 import traceback
 
+import numpy as np
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="GPU PPO smoke test")
@@ -108,8 +110,6 @@ def main() -> int:
         )
 
         # Smoke validation: final policy produces finite actions on a reset obs
-        import numpy as np
-
         obs = env.reset()
         assert isinstance(obs, np.ndarray), f"expected ndarray obs, got {type(obs)}"
         action, _ = model.predict(obs, deterministic=True)
@@ -117,14 +117,14 @@ def main() -> int:
         assert np.all(np.isfinite(action)), "non-finite action from trained policy"
 
         print(f"Final policy produces finite actions shape {action.shape}")
-
-        env.close()
         return 0
 
     except Exception:
         print("TRAINING FAILED:", file=sys.stderr)
         traceback.print_exc()
         return 1
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":
