@@ -10,7 +10,7 @@
 //! all happen host-side; the GPU does only the rollout + softmax-weighted
 //! mean.
 
-use crate::battle::{BatchConfig, BattleInfo, BattleState, StepResult};
+use crate::battle::{BatchConfig, BattleInfo, BattleState, SpawnMode, StepResult};
 use crate::f32_dynamics::DroneParamsF32;
 use crate::f32_sdf::ArenaF32;
 use crate::gpu::pipeline::{CostWeightsGpu, GpuBatchMppi, GpuInitError};
@@ -82,6 +82,7 @@ pub struct GpuBatchOrchestrator {
     /// `mppi_samples`/`horizon` doesn't perturb the physics stream).
     noise_rng: SmallRng,
     lockon_params: LockOnParams,
+    spawn_mode: SpawnMode,
 
     pub params: DroneParams,
     pub params_f32: DroneParamsF32,
@@ -150,6 +151,7 @@ impl GpuBatchOrchestrator {
         let mut master = SmallRng::seed_from_u64(seed);
         let noise_rng = SmallRng::seed_from_u64(master.gen());
 
+        let spawn_mode = SpawnMode::default_for_warehouse();
         let mut battles = Vec::with_capacity(n_battles);
         let mut rngs = Vec::with_capacity(n_battles);
         for _ in 0..n_battles {
@@ -160,6 +162,7 @@ impl GpuBatchOrchestrator {
                 lockon_params.clone(),
                 batch_config.wind_sigma,
                 batch_config.wind_theta,
+                &spawn_mode,
                 &mut rng,
             );
             battles.push(battle);
@@ -175,6 +178,7 @@ impl GpuBatchOrchestrator {
             rngs,
             noise_rng,
             lockon_params,
+            spawn_mode,
             params,
             params_f32,
             arena,
@@ -184,6 +188,17 @@ impl GpuBatchOrchestrator {
             noise_std,
             mean_ctrls,
         })
+    }
+
+    /// Override the spawn mode used on reset. Primarily for domain
+    /// randomization or test setups.
+    pub fn set_spawn_mode(&mut self, mode: SpawnMode) {
+        self.spawn_mode = mode;
+    }
+
+    /// Read the current spawn mode.
+    pub fn spawn_mode(&self) -> &SpawnMode {
+        &self.spawn_mode
     }
 
     /// Number of active battles.
@@ -209,6 +224,7 @@ impl GpuBatchOrchestrator {
                 &self.lockon_params,
                 self.batch_config.wind_sigma,
                 self.batch_config.wind_theta,
+                &self.spawn_mode,
                 rng,
             );
         }
@@ -474,6 +490,7 @@ impl GpuBatchOrchestrator {
                     &self.lockon_params,
                     self.batch_config.wind_sigma,
                     self.batch_config.wind_theta,
+                    &self.spawn_mode,
                     &mut self.rngs[i],
                 );
                 for d_offset in 0..2 {

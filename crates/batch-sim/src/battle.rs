@@ -7,6 +7,79 @@ use aces_sim_core::wind::WindModel;
 use nalgebra::{Vector3, Vector4};
 use rand::Rng;
 
+/// How initial drone positions are sampled at reset.
+///
+/// The CPU environment (`DroneDogfightEnv.reset`) uses fixed corner spawns
+/// plus small uniform jitter. The original batch-sim spawn was uniform random
+/// anywhere in the arena with obstacle rejection — this produced a completely
+/// different initial state distribution than the CPU env, breaking policy
+/// transfer between CPU-trained and GPU-batch-trained agents.
+///
+/// `Fixed` matches CPU env semantics and is the default.
+/// `Random` is retained for explicit domain randomization.
+#[derive(Debug, Clone)]
+pub enum SpawnMode {
+    /// Fixed spawn positions with uniform jitter per axis. Matches CPU env
+    /// `DroneDogfightEnv.reset()` semantics.
+    Fixed {
+        spawn_a: Vector3<f64>,
+        spawn_b: Vector3<f64>,
+        /// Uniform jitter of `±jitter` applied independently on each axis.
+        jitter: f64,
+    },
+    /// Uniform random positions inside arena with obstacle rejection.
+    /// Use for domain randomization.
+    Random { margin: f64 },
+}
+
+impl SpawnMode {
+    /// Default matching CPU env arena.toml: `spawn_a=(1,1,1.5)`,
+    /// `spawn_b=(9,9,1.5)`, `jitter=0.5`.
+    pub fn default_for_warehouse() -> Self {
+        SpawnMode::Fixed {
+            spawn_a: Vector3::new(1.0, 1.0, 1.5),
+            spawn_b: Vector3::new(9.0, 9.0, 1.5),
+            jitter: 0.5,
+        }
+    }
+
+    /// Sample spawn positions for drone A and drone B.
+    pub fn sample<R: Rng>(&self, arena: &Arena, rng: &mut R) -> (Vector3<f64>, Vector3<f64>) {
+        match self {
+            SpawnMode::Fixed {
+                spawn_a,
+                spawn_b,
+                jitter,
+            } => {
+                let j = *jitter;
+                let jit = |base: &Vector3<f64>, rng: &mut R| -> Vector3<f64> {
+                    if j == 0.0 {
+                        *base
+                    } else {
+                        Vector3::new(
+                            base.x + rng.gen_range(-j..=j),
+                            base.y + rng.gen_range(-j..=j),
+                            base.z + rng.gen_range(-j..=j),
+                        )
+                    }
+                };
+                (jit(spawn_a, rng), jit(spawn_b, rng))
+            }
+            SpawnMode::Random { margin } => {
+                let a = random_safe_position(arena, *margin, rng);
+                let b = random_safe_position(arena, *margin, rng);
+                (a, b)
+            }
+        }
+    }
+}
+
+impl Default for SpawnMode {
+    fn default() -> Self {
+        Self::default_for_warehouse()
+    }
+}
+
 /// Configuration for a batch of battles.
 #[derive(Debug, Clone)]
 pub struct BatchConfig {
@@ -112,17 +185,17 @@ impl BattleState {
         }
     }
 
-    /// Spawn with randomized positions within the arena.
+    /// Spawn drones according to `spawn_mode`.
+    #[allow(clippy::too_many_arguments)]
     pub fn random_spawn<R: Rng>(
         arena: &Arena,
         lockon_params: LockOnParams,
         wind_sigma: f64,
         wind_theta: f64,
+        spawn_mode: &SpawnMode,
         rng: &mut R,
     ) -> Self {
-        let margin = 0.5;
-        let spawn_a = random_safe_position(arena, margin, rng);
-        let spawn_b = random_safe_position(arena, margin, rng);
+        let (spawn_a, spawn_b) = spawn_mode.sample(arena, rng);
         Self::new(spawn_a, spawn_b, lockon_params, wind_sigma, wind_theta)
     }
 
@@ -189,18 +262,18 @@ impl BattleState {
         }
     }
 
-    /// Reset the battle to new random positions.
+    /// Reset the battle to new spawn positions sampled from `spawn_mode`.
+    #[allow(clippy::too_many_arguments)]
     pub fn reset<R: Rng>(
         &mut self,
         arena: &Arena,
         lockon_params: &LockOnParams,
         wind_sigma: f64,
         wind_theta: f64,
+        spawn_mode: &SpawnMode,
         rng: &mut R,
     ) {
-        let margin = 0.5;
-        let spawn_a = random_safe_position(arena, margin, rng);
-        let spawn_b = random_safe_position(arena, margin, rng);
+        let (spawn_a, spawn_b) = spawn_mode.sample(arena, rng);
 
         self.state_a = DroneState::hover_at(spawn_a);
         self.state_b = DroneState::hover_at(spawn_b);
@@ -238,6 +311,8 @@ fn random_safe_position<R: Rng>(arena: &Arena, margin: f64, rng: &mut R) -> Vect
 mod tests {
     use super::*;
     use aces_sim_core::environment::Obstacle;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
 
     fn test_arena() -> Arena {
         let mut arena = Arena::new(Vector3::new(10.0, 10.0, 3.0));
@@ -255,9 +330,76 @@ mod tests {
         let arena = test_arena();
         let lockon = LockOnParams::default();
         let mut rng = rand::thread_rng();
-        let battle = BattleState::random_spawn(&arena, lockon, 0.0, 2.0, &mut rng);
+        let spawn_mode = SpawnMode::default_for_warehouse();
+        let battle = BattleState::random_spawn(&arena, lockon, 0.0, 2.0, &spawn_mode, &mut rng);
         assert!(!battle.done);
         assert_eq!(battle.step_count, 0);
+    }
+
+    #[test]
+    fn test_fixed_spawn_mode_matches_cpu_env_defaults() {
+        // With jitter=0, sample always returns the exact base spawn positions
+        // matching the CPU env configured spawn (arena.toml).
+        let mode = SpawnMode::Fixed {
+            spawn_a: Vector3::new(1.0, 1.0, 1.5),
+            spawn_b: Vector3::new(9.0, 9.0, 1.5),
+            jitter: 0.0,
+        };
+        let arena = test_arena();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let (a, b) = mode.sample(&arena, &mut rng);
+        assert_eq!(a, Vector3::new(1.0, 1.0, 1.5));
+        assert_eq!(b, Vector3::new(9.0, 9.0, 1.5));
+    }
+
+    #[test]
+    fn test_fixed_spawn_mode_jitter_bounded() {
+        // With jitter=0.5, all samples within ±0.5 of base spawn (per axis).
+        let mode = SpawnMode::Fixed {
+            spawn_a: Vector3::new(1.0, 1.0, 1.5),
+            spawn_b: Vector3::new(9.0, 9.0, 1.5),
+            jitter: 0.5,
+        };
+        let arena = test_arena();
+        let mut rng = SmallRng::seed_from_u64(7);
+        for _ in 0..100 {
+            let (a, b) = mode.sample(&arena, &mut rng);
+            assert!((a.x - 1.0).abs() <= 0.5);
+            assert!((a.y - 1.0).abs() <= 0.5);
+            assert!((a.z - 1.5).abs() <= 0.5);
+            assert!((b.x - 9.0).abs() <= 0.5);
+            assert!((b.y - 9.0).abs() <= 0.5);
+            assert!((b.z - 1.5).abs() <= 0.5);
+        }
+    }
+
+    #[test]
+    fn test_random_spawn_mode_bounded_by_arena() {
+        let mode = SpawnMode::Random { margin: 0.5 };
+        let arena = test_arena();
+        let mut rng = SmallRng::seed_from_u64(42);
+        for _ in 0..50 {
+            let (a, b) = mode.sample(&arena, &mut rng);
+            assert!(a.x >= 0.5 && a.x <= 9.5);
+            assert!(a.y >= 0.5 && a.y <= 9.5);
+            assert!(a.z >= 0.5 && a.z <= 2.5);
+            assert!(b.x >= 0.5 && b.x <= 9.5);
+            assert!(b.y >= 0.5 && b.y <= 9.5);
+            assert!(b.z >= 0.5 && b.z <= 2.5);
+            // Fallback corner (1,1,1.5) always has sdf>0 in test_arena, so
+            // `random_safe_position` is guaranteed to return a point with
+            // sdf > 0 (either an accepted sample or the fallback).
+            assert!(
+                arena.sdf(&a) > 0.0,
+                "sample a={a:?} has sdf={:.3}",
+                arena.sdf(&a)
+            );
+            assert!(
+                arena.sdf(&b) > 0.0,
+                "sample b={b:?} has sdf={:.3}",
+                arena.sdf(&b)
+            );
+        }
     }
 
     #[test]
