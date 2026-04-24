@@ -318,7 +318,7 @@ def main():
         "--n-envs",
         type=int,
         default=8,
-        help="Number of parallel envs (applies to both CPU SubprocVecEnv and GPU VecEnv paths; default: 8)",
+        help="Number of parallel envs for --mode curriculum (ignored by --mode train / evaluate / export; default: 8)",
     )
 
     # Evaluate mode
