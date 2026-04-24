@@ -110,6 +110,10 @@ class CurriculumTrainer:
         pool_max_size: int = 20,
         device: str = "auto",
         seed: int | None = None,
+        use_gpu_env: bool = False,
+        gpu_mppi_samples: int = 128,
+        gpu_mppi_horizon: int = 15,
+        gpu_noise_std: float = 0.03,
     ):
         self._config_dir = config_dir
         self._seed = seed
@@ -117,6 +121,10 @@ class CurriculumTrainer:
         self._save_dir = Path(save_dir) if save_dir else None
         self._n_envs = n_envs
         self._checkpoint_interval = checkpoint_interval
+        self._use_gpu_env = use_gpu_env
+        self._gpu_mppi_samples = gpu_mppi_samples
+        self._gpu_mppi_horizon = gpu_mppi_horizon
+        self._gpu_noise_std = gpu_noise_std
         self._ppo_kwargs = dict(
             learning_rate=learning_rate,
             n_steps=n_steps,
@@ -202,7 +210,50 @@ class CurriculumTrainer:
         return DroneDogfightEnv(**kwargs)
 
     def _make_vec_env(self, phase_or_task):
-        """Create a VecEnv with VecNormalize wrapping."""
+        """Create a VecEnv with VecNormalize wrapping.
+
+        When ``use_gpu_env=True``, returns a :class:`GpuVecEnv`-backed stack
+        regardless of the phase's ``task`` / ``opponent`` settings. The GPU env
+        hardcodes MPPI-vs-PPO dogfight; curriculum-specific opponents
+        (trajectory controllers, pool opponents, no-opponent) and alternate
+        tasks (hover, pursuit_linear, etc.) are NOT supported by that backend
+        and will be silently overridden.
+        """
+        if self._use_gpu_env:
+            from stable_baselines3.common.vec_env import VecNormalize
+
+            from aces.training.gpu_vec_env import GpuVecEnv as _GpuVecEnv
+
+            task_name = getattr(phase_or_task, "task", phase_or_task)
+            opp_name = getattr(phase_or_task, "opponent", None)
+            if isinstance(task_name, str) and task_name not in {
+                "dogfight",
+                "pursuit_linear",
+                "pursuit_evasive",
+            }:
+                logger.warning(
+                    "Phase task '%s' requested but GpuVecEnv only supports "
+                    "MPPI opponent dogfight; agent B will be GPU MPPI regardless",
+                    task_name,
+                )
+            if opp_name is not None and opp_name != "mppi":
+                logger.warning(
+                    "Phase opponent '%s' ignored under --use-gpu-env; "
+                    "agent B is GPU MPPI",
+                    opp_name,
+                )
+
+            raw_env = _GpuVecEnv(
+                n_envs=self._n_envs,
+                mppi_samples=self._gpu_mppi_samples,
+                mppi_horizon=self._gpu_mppi_horizon,
+                noise_std=self._gpu_noise_std,
+                seed=self._seed if self._seed is not None else 42,
+            )
+            return VecNormalize(
+                raw_env, norm_obs=True, norm_reward=False, clip_obs=10.0
+            )
+
         from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
         if hasattr(phase_or_task, "task"):
