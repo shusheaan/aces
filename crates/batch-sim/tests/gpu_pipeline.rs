@@ -139,6 +139,102 @@ fn test_pipeline_exposes_dims_uniform() {
 }
 
 #[test]
+fn test_pipeline_builds_compute_pipelines() {
+    // Construction succeeds and both compute pipelines are owned by the
+    // struct. We can't introspect wgpu::ComputePipeline much — the
+    // fact that `create_compute_pipeline` didn't panic already tells us
+    // the WGSL compiled on this device. Presence of the fields is the
+    // assertion (they are non-Option, so the compile itself is the check).
+    if !gpu_available_or_skip("test_pipeline_builds_compute_pipelines") {
+        return;
+    }
+    let params = DroneParamsF32::crazyflie();
+    let arena = warehouse_arena_f32();
+    let weights = default_weights();
+
+    let pipeline =
+        GpuBatchMppi::new(4, 32, 10, &params, weights, &arena).expect("pipeline construction");
+
+    // Take references to force the compiler to acknowledge the fields exist;
+    // if any field is renamed or removed, this test will stop compiling.
+    let _rollout: &wgpu::ComputePipeline = &pipeline.rollout_pipeline;
+    let _softmax: &wgpu::ComputePipeline = &pipeline.softmax_pipeline;
+    let _bgl: &wgpu::BindGroupLayout = &pipeline.bind_group_layout;
+}
+
+#[test]
+fn test_bind_group_assembles_against_layout() {
+    // Stronger than just field-presence: try to actually build a BindGroup
+    // from the pipeline's layout + its own buffers. This exercises the
+    // consistency between BindGroupLayoutEntry usage flags (Storage vs Uniform)
+    // and the buffer creation flags (STORAGE vs UNIFORM). If any entry in
+    // `bind_group_layout_entries()` disagrees with the buffer's `usage`,
+    // this call panics with a descriptive wgpu validation error.
+    if !gpu_available_or_skip("test_bind_group_assembles_against_layout") {
+        return;
+    }
+    let params = DroneParamsF32::crazyflie();
+    let arena = warehouse_arena_f32();
+    let weights = default_weights();
+
+    let pipeline =
+        GpuBatchMppi::new(4, 32, 10, &params, weights, &arena).expect("pipeline construction");
+
+    let _bind_group = pipeline
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mppi.test_bind_group"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: pipeline.states_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: pipeline.enemies_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: pipeline.mean_ctrls_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: pipeline.noise_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: pipeline.costs_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: pipeline.ctrls_out_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: pipeline.result_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: pipeline.params_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: pipeline.weights_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: pipeline.obstacles_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: pipeline.dims_uniform.as_entire_binding(),
+                },
+            ],
+        });
+}
+
+#[test]
 fn test_pipeline_rejects_too_many_obstacles() {
     if !gpu_available_or_skip("test_pipeline_rejects_too_many_obstacles") {
         return;
