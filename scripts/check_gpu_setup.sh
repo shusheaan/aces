@@ -80,7 +80,7 @@ if [ $PROBE_RC -ne 0 ]; then
     report_fail "gpu_probe build/run failed (exit $PROBE_RC). Tail:"
     echo "$PROBE_OUT" | tail -20 | sed 's/^/      /'
 elif echo "$PROBE_OUT" | grep -q "No GPU adapters found"; then
-    report_skip "No GPU adapter detected by wgpu. GPU-dependent stages will skip."
+    report_skip "No GPU adapter detected by wgpu."
     echo "      (Apple Silicon: should auto-detect Metal. Check your wgpu/driver setup.)"
 else
     ADAPTER=$(echo "$PROBE_OUT" | grep -E "Name:" | head -1 | sed 's/.*Name: *//')
@@ -106,21 +106,45 @@ if ! command -v poetry >/dev/null 2>&1; then
     report_skip "poetry not on PATH — Python layer unavailable."
 else
     PY_OUT=$(poetry run python -c "
+import importlib.util
+import sys
+
 try:
-    from aces._core import GpuVecEnv
+    spec = importlib.util.find_spec('aces._core')
+except ImportError as e:
+    # Parent package (aces/__init__.py) failed to import — almost always a
+    # missing transitive dep (numpy, gymnasium, ...), not a missing extension.
+    print(f'IMPORT_ERR {e}')
+    sys.exit(0)
+
+if spec is None:
+    print('MISSING_CORE')
+    sys.exit(0)
+
+try:
+    import aces._core  # noqa: F401
     print('OK')
 except ImportError as e:
-    print(f'FAIL {e}')
-except Exception as e:
-    print(f'FAIL {type(e).__name__}: {e}')
+    print(f'IMPORT_ERR {e}')
+    sys.exit(0)
 " 2>&1)
     PY_RC=$?
-    if [ $PY_RC -eq 0 ] && echo "$PY_OUT" | grep -q "^OK"; then
-        report_ok "aces._core.GpuVecEnv importable"
-    else
-        report_fail "aces._core not built with gpu feature"
+    PY_LAST=$(echo "$PY_OUT" | tail -1)
+    if [ $PY_RC -ne 0 ]; then
+        report_fail "python probe crashed (exit $PY_RC):"
+        echo "$PY_OUT" | tail -10 | sed 's/^/      /'
+    elif [ "$PY_LAST" = "OK" ]; then
+        report_ok "aces._core importable"
+    elif [ "$PY_LAST" = "MISSING_CORE" ]; then
+        report_fail "aces._core extension not built"
         echo "      Hint: poetry run maturin develop --features gpu --release"
-        echo "      Error: $(echo "$PY_OUT" | tail -1)"
+    elif [[ "$PY_LAST" == IMPORT_ERR* ]]; then
+        report_fail "aces._core import failed (likely missing Python dep)"
+        echo "      Hint: poetry install  (ensure the poetry env is complete)"
+        echo "      Error: ${PY_LAST#IMPORT_ERR }"
+    else
+        report_fail "unexpected python probe output:"
+        echo "$PY_OUT" | tail -10 | sed 's/^/      /'
     fi
 fi
 
