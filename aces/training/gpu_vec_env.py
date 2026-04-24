@@ -65,6 +65,33 @@ def denormalize_action(actions: np.ndarray) -> np.ndarray:
     return cast(np.ndarray, clipped)
 
 
+def _load_reward_from_rules() -> dict:
+    """Read the 8 reward weights the Rust orchestrator expects from rules.toml.
+
+    Only the ``[reward]`` section is consulted — per-task overrides are NOT
+    applied here (see ``GpuVecEnv.__init__`` docstring). ``opponent_crash_reward``
+    is not in the base ``[reward]`` dataclass (it's only specified via task
+    overrides in rules.toml), so we fall back to the Rust default (5.0) to
+    preserve existing behavior.
+    """
+    import dataclasses
+
+    from aces.config import load_configs
+
+    cfg = load_configs()
+    base = dataclasses.asdict(cfg.rules.reward)
+    return {
+        "kill_reward": float(base["kill_reward"]),
+        "killed_penalty": float(base["killed_penalty"]),
+        "collision_penalty": float(base["collision_penalty"]),
+        "opponent_crash_reward": float(base.get("opponent_crash_reward", 5.0)),
+        "lock_progress_reward": float(base["lock_progress_reward"]),
+        "approach_reward": float(base["approach_reward"]),
+        "survival_bonus": float(base["survival_bonus"]),
+        "control_penalty": float(base["control_penalty"]),
+    }
+
+
 class GpuVecEnv(VecEnv):
     """SB3 VecEnv backed by the Rust GPU MPPI orchestrator.
 
@@ -87,7 +114,24 @@ class GpuVecEnv(VecEnv):
         substeps: int = 10,
         wind_sigma: float = 0.0,
         seed: int = 42,
+        reward_config: Optional[dict] = None,
     ):
+        """Create a GPU-backed VecEnv of N parallel MPPI-vs-PPO battles.
+
+        Args:
+            reward_config: optional override for the 8 reward weights consumed
+                by the Rust orchestrator. When ``None``, weights are read from
+                ``configs/rules.toml`` section ``[reward]`` so GPU training
+                uses the same tuned signal as the CPU env. Keys (all floats):
+                ``kill_reward``, ``killed_penalty``, ``collision_penalty``,
+                ``opponent_crash_reward``, ``lock_progress_reward``,
+                ``approach_reward``, ``survival_bonus``, ``control_penalty``.
+
+        Note:
+            Per-task reward overrides (``[task_reward_overrides.<task>]`` in
+            rules.toml) are NOT merged here — this slice uses the base
+            ``[reward]`` section only. Per-task plumbing is a follow-up.
+        """
         if not _GPU_AVAILABLE:
             raise RuntimeError(
                 "aces._core.GpuVecEnv not available — rebuild with --features gpu"
@@ -96,6 +140,9 @@ class GpuVecEnv(VecEnv):
         observation_space = Box(low=-np.inf, high=np.inf, shape=(21,), dtype=np.float32)
         action_space = Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
         super().__init__(n_envs, observation_space, action_space)
+
+        if reward_config is None:
+            reward_config = _load_reward_from_rules()
 
         self._rust = _RustGpuVecEnv(
             n_envs=n_envs,
@@ -107,6 +154,7 @@ class GpuVecEnv(VecEnv):
             substeps=substeps,
             wind_sigma=wind_sigma,
             seed=seed,
+            **reward_config,
         )
 
         self._last_actions: Optional[np.ndarray] = None

@@ -218,6 +218,12 @@ class CurriculumTrainer:
         (trajectory controllers, pool opponents, no-opponent) and alternate
         tasks (hover, pursuit_linear, etc.) are NOT supported by that backend
         and will be silently overridden.
+
+        Reward weights: :class:`GpuVecEnv` reads the base ``[reward]`` section
+        from ``configs/rules.toml`` (``reward_config=None`` -> auto-resolve).
+        Per-task overrides from ``[task_reward_overrides.<task>]`` are NOT
+        merged yet — follow-up slice. Matching the CPU path's per-task
+        weighting requires passing a merged ``reward_config`` dict here.
         """
         if self._use_gpu_env:
             from stable_baselines3.common.vec_env import VecNormalize
