@@ -1,4 +1,4 @@
-use crate::battle::{BatchConfig, BattleInfo, BattleState, StepResult};
+use crate::battle::{BatchConfig, BattleInfo, BattleState, SpawnMode, StepResult};
 use crate::observation::build_observation;
 use crate::reward::{self, RewardConfig};
 use aces_mppi::cost::CostWeights;
@@ -59,6 +59,7 @@ pub struct BatchOrchestrator {
     lockon_params: LockOnParams,
     batch_config: BatchConfig,
     reward_config: RewardConfig,
+    spawn_mode: SpawnMode,
 
     // Running stats
     stats: BatchStats,
@@ -75,6 +76,7 @@ impl BatchOrchestrator {
         batch_config: BatchConfig,
         reward_config: RewardConfig,
     ) -> Self {
+        let spawn_mode = SpawnMode::default_for_warehouse();
         let mut master_rng = rand::thread_rng();
 
         let mut battles = Vec::with_capacity(n_battles);
@@ -91,6 +93,7 @@ impl BatchOrchestrator {
                 lockon_params.clone(),
                 batch_config.wind_sigma,
                 batch_config.wind_theta,
+                &spawn_mode,
                 &mut rng,
             );
             battles.push(battle);
@@ -134,8 +137,20 @@ impl BatchOrchestrator {
             lockon_params,
             batch_config,
             reward_config,
+            spawn_mode,
             stats: BatchStats::default(),
         }
+    }
+
+    /// Override the spawn mode used on reset. Primarily for domain
+    /// randomization or test setups.
+    pub fn set_spawn_mode(&mut self, mode: SpawnMode) {
+        self.spawn_mode = mode;
+    }
+
+    /// Read the current spawn mode.
+    pub fn spawn_mode(&self) -> &SpawnMode {
+        &self.spawn_mode
     }
 
     /// Number of active battles.
@@ -181,6 +196,7 @@ impl BatchOrchestrator {
                     arena,
                     batch_config.dt_ctrl,
                     batch_config.substeps,
+                    batch_config.max_steps,
                     rng,
                 );
 
@@ -292,6 +308,7 @@ impl BatchOrchestrator {
                     &self.lockon_params,
                     self.batch_config.wind_sigma,
                     self.batch_config.wind_theta,
+                    &self.spawn_mode,
                     &mut self.rngs[i],
                 );
                 self.optimizers_a[i].reset();
@@ -466,7 +483,7 @@ mod tests {
             reward_config,
         );
 
-        // Run enough steps that episodes should complete (collision or timeout at 1000)
+        // Run enough steps that episodes should complete (collision or timeout at max_steps=50)
         let stats = orch.run(100);
         // At least some steps should have been taken
         assert!(stats.total_steps > 0);
