@@ -9,17 +9,12 @@ import pytest
 
 
 @pytest.fixture(scope="module")
-def gpu_env():
-    try:
-        from aces.training.gpu_vec_env import GpuVecEnv
-    except (ImportError, RuntimeError):
-        pytest.skip("aces._core.GpuVecEnv not available (rebuild with --features gpu)")
+def gpu_env(gpu_available: bool):
+    if not gpu_available:
+        pytest.skip("GPU not available")
+    from aces.training.gpu_vec_env import GpuVecEnv
 
-    try:
-        env = GpuVecEnv(n_envs=4, mppi_samples=32, mppi_horizon=10)
-    except RuntimeError as e:
-        pytest.skip(f"GpuVecEnv init failed (likely no GPU adapter): {e}")
-
+    env = GpuVecEnv(n_envs=4, mppi_samples=32, mppi_horizon=10)
     yield env
     env.close()
 
