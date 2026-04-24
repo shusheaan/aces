@@ -1213,6 +1213,17 @@ mod gpu_binding {
             substeps = 10,
             wind_sigma = 0.0,
             seed = 42,
+            // Reward config (defaults match `RewardConfig::default()` /
+            // configs/rules.toml [reward]). Overridable from Python so
+            // GPU training reads the same tuned weights as the CPU env.
+            kill_reward = 100.0,
+            killed_penalty = -100.0,
+            collision_penalty = -50.0,
+            opponent_crash_reward = 5.0,
+            lock_progress_reward = 5.0,
+            approach_reward = 3.0,
+            survival_bonus = 0.01,
+            control_penalty = 0.01,
         ))]
         #[allow(clippy::too_many_arguments)]
         fn new(
@@ -1225,6 +1236,14 @@ mod gpu_binding {
             substeps: usize,
             wind_sigma: f64,
             seed: u64,
+            kill_reward: f64,
+            killed_penalty: f64,
+            collision_penalty: f64,
+            opponent_crash_reward: f64,
+            lock_progress_reward: f64,
+            approach_reward: f64,
+            survival_bonus: f64,
+            control_penalty: f64,
         ) -> PyResult<Self> {
             if n_envs == 0 {
                 return Err(PyValueError::new_err("n_envs must be > 0"));
@@ -1236,7 +1255,16 @@ mod gpu_binding {
                 wind_sigma,
                 wind_theta: 2.0,
             };
-            let reward_config = RewardConfig::default();
+            let reward_config = RewardConfig {
+                kill_reward,
+                killed_penalty,
+                collision_penalty,
+                opponent_crash_reward,
+                lock_progress_reward,
+                approach_reward,
+                survival_bonus,
+                control_penalty,
+            };
             let inner = GpuBatchOrchestrator::new(
                 n_envs,
                 batch_config,
