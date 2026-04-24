@@ -959,7 +959,7 @@ impl MppiController {
 
 #[cfg(feature = "gpu")]
 mod gpu_binding {
-    use aces_batch_sim::battle::BatchConfig;
+    use aces_batch_sim::battle::{BatchConfig, StepResult};
     use aces_batch_sim::f32_dynamics::DroneParamsF32;
     use aces_batch_sim::f32_sdf::{ArenaF32, ObstacleF32};
     use aces_batch_sim::gpu::orchestrator::GpuBatchOrchestrator;
@@ -973,6 +973,60 @@ mod gpu_binding {
     use pyo3::exceptions::{PyRuntimeError, PyValueError};
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
+
+    /// Pack a `Vec<StepResult>` into the `(obs, rewards, dones, infos)` tuple
+    /// returned by both `PyGpuVecEnv::step` and
+    /// `PyGpuVecEnv::step_with_agent_a`. Factored out so the two step methods
+    /// don't drift.
+    #[allow(clippy::type_complexity)]
+    fn pack_step_results<'py>(
+        py: Python<'py>,
+        step_results: Vec<StepResult>,
+        n_envs: usize,
+    ) -> PyResult<(
+        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray1<f32>>,
+        Bound<'py, PyArray1<bool>>,
+        Bound<'py, PyList>,
+    )> {
+        debug_assert_eq!(step_results.len(), n_envs);
+
+        let mut obs = Vec::with_capacity(n_envs * 21);
+        let mut rewards = Vec::with_capacity(n_envs);
+        let mut dones = Vec::with_capacity(n_envs);
+
+        for r in &step_results {
+            for j in 0..21 {
+                obs.push(r.obs_a[j] as f32);
+            }
+            rewards.push(r.reward_a as f32);
+            dones.push(r.done);
+        }
+
+        let py_obs_1d = obs.into_pyarray(py);
+        let py_obs = py_obs_1d
+            .reshape([n_envs, 21])
+            .map_err(|e| PyRuntimeError::new_err(format!("reshape failed: {e}")))?;
+        let py_rewards = rewards.into_pyarray(py);
+        let py_dones = dones.into_pyarray(py);
+
+        let infos = PyList::empty(py);
+        for r in &step_results {
+            let d = PyDict::new(py);
+            d.set_item("distance", r.info.distance)?;
+            d.set_item("lock_a", r.info.lock_progress_a)?;
+            d.set_item("lock_b", r.info.lock_progress_b)?;
+            d.set_item("visible", r.info.visible_ab)?;
+            d.set_item("kill_a", r.info.kill_a)?;
+            d.set_item("kill_b", r.info.kill_b)?;
+            d.set_item("collision_a", r.info.collision_a)?;
+            d.set_item("collision_b", r.info.collision_b)?;
+            d.set_item("timeout", r.info.timeout)?;
+            infos.append(d)?;
+        }
+
+        Ok((py_obs, py_rewards, py_dones, infos))
+    }
 
     /// GPU-accelerated batched MPPI optimizer.
     ///
@@ -1244,44 +1298,51 @@ mod gpu_binding {
             Bound<'py, PyList>,
         )> {
             let step_results = py.allow_threads(|| self.inner.step_all());
-            let n = step_results.len();
-            debug_assert_eq!(n, self.n_envs);
+            pack_step_results(py, step_results, self.n_envs)
+        }
 
-            let mut obs = Vec::with_capacity(n * 21);
-            let mut rewards = Vec::with_capacity(n);
-            let mut dones = Vec::with_capacity(n);
-
-            for r in &step_results {
-                for j in 0..21 {
-                    obs.push(r.obs_a[j] as f32);
-                }
-                rewards.push(r.reward_a as f32);
-                dones.push(r.done);
+        /// Step every battle once using external actions for agent A
+        /// (learning agent) and GPU MPPI for agent B (opponent).
+        ///
+        /// Arguments:
+        ///   * `actions_a`: float32 ndarray shape `(n_envs, 4)`. Each row is a
+        ///     per-motor thrust command in `[0, max_thrust]` for the agent-A
+        ///     drone in that battle. Values outside the range are clamped.
+        ///
+        /// Returns `(obs, rewards, dones, infos)` with the same layout as
+        /// [`Self::step`]. The full GPU MPPI dispatch still runs for both
+        /// drones (so agent B's rollouts condition on agent A's true state),
+        /// but the GPU's proposed action for agent A is discarded in favor
+        /// of `actions_a`.
+        #[allow(clippy::type_complexity)]
+        fn step_with_agent_a<'py>(
+            &mut self,
+            py: Python<'py>,
+            actions_a: PyReadonlyArray2<'py, f32>,
+        ) -> PyResult<(
+            Bound<'py, PyArray2<f32>>,
+            Bound<'py, PyArray1<f32>>,
+            Bound<'py, PyArray1<bool>>,
+            Bound<'py, PyList>,
+        )> {
+            let shape = actions_a.shape();
+            if shape != [self.n_envs, 4] {
+                return Err(PyValueError::new_err(format!(
+                    "actions_a shape {:?} != ({}, 4)",
+                    shape, self.n_envs
+                )));
             }
 
-            let py_obs_1d = obs.into_pyarray(py);
-            let py_obs = py_obs_1d
-                .reshape([n, 21])
-                .map_err(|e| PyRuntimeError::new_err(format!("reshape failed: {e}")))?;
-            let py_rewards = rewards.into_pyarray(py);
-            let py_dones = dones.into_pyarray(py);
+            // Materialize into a Vec<[f32; 4]> ahead of `allow_threads` so
+            // that the numpy array borrow doesn't escape the GIL scope.
+            let arr = actions_a.as_array();
+            let actions_vec: Vec<[f32; 4]> = (0..self.n_envs)
+                .map(|i| [arr[(i, 0)], arr[(i, 1)], arr[(i, 2)], arr[(i, 3)]])
+                .collect();
 
-            let infos = PyList::empty(py);
-            for r in &step_results {
-                let d = PyDict::new(py);
-                d.set_item("distance", r.info.distance)?;
-                d.set_item("lock_a", r.info.lock_progress_a)?;
-                d.set_item("lock_b", r.info.lock_progress_b)?;
-                d.set_item("visible", r.info.visible_ab)?;
-                d.set_item("kill_a", r.info.kill_a)?;
-                d.set_item("kill_b", r.info.kill_b)?;
-                d.set_item("collision_a", r.info.collision_a)?;
-                d.set_item("collision_b", r.info.collision_b)?;
-                d.set_item("timeout", r.info.timeout)?;
-                infos.append(d)?;
-            }
-
-            Ok((py_obs, py_rewards, py_dones, infos))
+            let step_results =
+                py.allow_threads(|| self.inner.step_with_agent_a_actions(&actions_vec));
+            pack_step_results(py, step_results, self.n_envs)
         }
     }
 
