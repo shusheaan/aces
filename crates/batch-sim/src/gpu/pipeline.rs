@@ -301,7 +301,75 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
-/// GPU-resident MPPI batch pipeline — buffers only (no shader yet).
+/// Build the 11 bind-group layout entries that match the WGSL shader's
+/// `@group(0) @binding(0..10)` declarations.
+///
+/// This is a pure function — no wgpu device required — so tests can
+/// introspect the entries without needing GPU access. The actual
+/// `BindGroupLayout` is constructed inside [`GpuBatchMppi::new`] by
+/// calling `device.create_bind_group_layout` with these entries.
+///
+/// # Layout
+///
+/// | Binding | Usage                         | Maps to buffer        |
+/// |--------:|-------------------------------|-----------------------|
+/// | 0       | `Storage { read_only: true }` | `states_buffer`       |
+/// | 1       | `Storage { read_only: true }` | `enemies_buffer`      |
+/// | 2       | `Storage { read_only: true }` | `mean_ctrls_buffer`   |
+/// | 3       | `Storage { read_only: true }` | `noise_buffer`        |
+/// | 4       | `Storage { read_only: false}` | `costs_buffer`        |
+/// | 5       | `Storage { read_only: false}` | `ctrls_out_buffer`    |
+/// | 6       | `Storage { read_only: false}` | `result_buffer`       |
+/// | 7       | `Uniform`                     | `params_uniform`      |
+/// | 8       | `Uniform`                     | `weights_uniform`     |
+/// | 9       | `Storage { read_only: true }` | `obstacles_buffer`    |
+/// | 10      | `Uniform`                     | `dims_uniform`        |
+///
+/// All entries have `visibility = ShaderStages::COMPUTE` and `count = None`.
+/// Note on binding 2: the rollout kernel reads `mean_ctrls`; a future
+/// warm-start kernel will write it. Marked `read_only: true` here to match
+/// the current WGSL declaration in `mppi_rollout.wgsl`.
+pub(crate) fn bind_group_layout_entries() -> [wgpu::BindGroupLayoutEntry; 11] {
+    let storage_read = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let storage_rw = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: false },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let uniform = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+
+    let entry = |binding: u32, ty: wgpu::BindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    };
+
+    [
+        entry(0, storage_read), // states
+        entry(1, storage_read), // enemies
+        entry(2, storage_read), // mean_ctrls (rollout reads; future warm-start kernel writes)
+        entry(3, storage_read), // noise
+        entry(4, storage_rw),   // costs
+        entry(5, storage_rw),   // ctrls_out
+        entry(6, storage_rw),   // result
+        entry(7, uniform),      // params
+        entry(8, uniform),      // weights
+        entry(9, storage_read), // obstacles
+        entry(10, uniform),     // dims
+    ]
+}
+
+/// GPU-resident MPPI batch pipeline — buffers + bind group layout +
+/// compiled shader module + two compute pipelines.
 pub struct GpuBatchMppi {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -329,6 +397,12 @@ pub struct GpuBatchMppi {
 
     // Rollout dims uniform (binding 10). 32 bytes of `MppiDims`.
     pub dims_uniform: wgpu::Buffer,
+
+    // Bind-group layout + compiled shader + two compute pipelines.
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub shader_module: wgpu::ShaderModule,
+    pub rollout_pipeline: wgpu::ComputePipeline,
+    pub softmax_pipeline: wgpu::ComputePipeline,
 }
 
 impl GpuBatchMppi {
@@ -439,6 +513,55 @@ impl GpuBatchMppi {
         );
         queue.write_buffer(&dims_uniform, 0, bytemuck::bytes_of(&dims));
 
+        // -----------------------------------------------------------------
+        // Pipeline construction: bind group layout, shader module, two
+        // compute pipelines.
+        //
+        // `create_shader_module` and `create_compute_pipeline` do not
+        // return `Result`s in wgpu 23 — they panic on invalid WGSL via the
+        // device error callback. The full concatenated shader source is
+        // naga-validated by `crate::gpu::shader::validate_full_mppi()` and
+        // exercised by the `shader.rs::tests` suite, so a shader compile
+        // failure here would indicate a test gap, not a production bug.
+        // -----------------------------------------------------------------
+        let entries = bind_group_layout_entries();
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mppi.bind_group_layout"),
+            entries: &entries,
+        });
+
+        let shader_source = crate::gpu::shader::full_mppi_source();
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mppi.shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+
+        // Local; only needs to outlive the two pipeline creations below.
+        // The pipelines hold their own internal references to it.
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mppi.pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let rollout_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mppi.rollout_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader_module,
+            entry_point: Some("rollout_and_cost"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let softmax_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mppi.softmax_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader_module,
+            entry_point: Some("softmax_reduce"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         Ok(Self {
             device,
             queue,
@@ -457,6 +580,10 @@ impl GpuBatchMppi {
             weights_uniform,
             obstacles_buffer,
             dims_uniform,
+            bind_group_layout,
+            shader_module,
+            rollout_pipeline,
+            softmax_pipeline,
         })
     }
 
@@ -470,5 +597,111 @@ impl GpuBatchMppi {
     pub fn update_dims(&self, dims: MppiDims) {
         self.queue
             .write_buffer(&self.dims_uniform, 0, bytemuck::bytes_of(&dims));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The WGSL shader uses exactly 11 bindings (0..=10). If this count
+    /// ever drifts from the shader, the pipeline will fail to bind.
+    #[test]
+    fn test_bind_group_layout_has_11_entries() {
+        let entries = bind_group_layout_entries();
+        assert_eq!(entries.len(), 11);
+    }
+
+    /// Bindings must be the contiguous range 0..=10 with no gaps or
+    /// duplicates.
+    #[test]
+    fn test_bind_group_layout_bindings_are_0_through_10() {
+        let entries = bind_group_layout_entries();
+        let mut bindings: Vec<u32> = entries.iter().map(|e| e.binding).collect();
+        bindings.sort();
+        let expected: Vec<u32> = (0u32..=10).collect();
+        assert_eq!(bindings, expected);
+    }
+
+    /// Every entry must match the usage pattern the shader expects:
+    /// bindings 0,1,2,3,9 are read-only storage; 4,5,6 are read-write
+    /// storage; 7,8,10 are uniforms. All stages COMPUTE, no `count`.
+    #[test]
+    fn test_bind_group_layout_usage_matches_buffers() {
+        let entries = bind_group_layout_entries();
+
+        // Shared sanity: all entries are COMPUTE visibility, no array count.
+        for e in &entries {
+            assert_eq!(
+                e.visibility,
+                wgpu::ShaderStages::COMPUTE,
+                "binding {} must be COMPUTE-visible",
+                e.binding,
+            );
+            assert!(
+                e.count.is_none(),
+                "binding {} must have count = None",
+                e.binding,
+            );
+        }
+
+        // Helper to classify `BindingType::Buffer` variants.
+        fn is_storage_read(ty: &wgpu::BindingType) -> bool {
+            matches!(
+                ty,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    ..
+                }
+            )
+        }
+        fn is_storage_rw(ty: &wgpu::BindingType) -> bool {
+            matches!(
+                ty,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    ..
+                }
+            )
+        }
+        fn is_uniform(ty: &wgpu::BindingType) -> bool {
+            matches!(
+                ty,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    ..
+                }
+            )
+        }
+
+        let get = |binding: u32| -> &wgpu::BindingType {
+            &entries
+                .iter()
+                .find(|e| e.binding == binding)
+                .unwrap_or_else(|| panic!("binding {binding} missing"))
+                .ty
+        };
+
+        for b in [0u32, 1, 2, 3, 9] {
+            assert!(
+                is_storage_read(get(b)),
+                "binding {b} must be read-only storage, got {:?}",
+                get(b),
+            );
+        }
+        for b in [4u32, 5, 6] {
+            assert!(
+                is_storage_rw(get(b)),
+                "binding {b} must be read-write storage, got {:?}",
+                get(b),
+            );
+        }
+        for b in [7u32, 8, 10] {
+            assert!(
+                is_uniform(get(b)),
+                "binding {b} must be uniform, got {:?}",
+                get(b),
+            );
+        }
     }
 }

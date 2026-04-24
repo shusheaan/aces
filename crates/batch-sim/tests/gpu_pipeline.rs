@@ -139,6 +139,47 @@ fn test_pipeline_exposes_dims_uniform() {
 }
 
 #[test]
+fn test_pipeline_builds_compute_pipelines() {
+    // Construction succeeds and both compute pipelines are owned by the
+    // struct. We can't introspect wgpu::ComputePipeline much — the
+    // fact that `create_compute_pipeline` didn't panic already tells us
+    // the WGSL compiled on this device. Presence of the fields is the
+    // assertion (they are non-Option, so the compile itself is the check).
+    if !gpu_available_or_skip("test_pipeline_builds_compute_pipelines") {
+        return;
+    }
+    let params = DroneParamsF32::crazyflie();
+    let arena = warehouse_arena_f32();
+    let weights = default_weights();
+
+    let pipeline =
+        GpuBatchMppi::new(4, 32, 10, &params, weights, &arena).expect("pipeline construction");
+
+    // Take references to force the compiler to acknowledge the fields exist;
+    // if any field is renamed or removed, this test will stop compiling.
+    let _rollout: &wgpu::ComputePipeline = &pipeline.rollout_pipeline;
+    let _softmax: &wgpu::ComputePipeline = &pipeline.softmax_pipeline;
+    let _bgl: &wgpu::BindGroupLayout = &pipeline.bind_group_layout;
+}
+
+#[test]
+fn test_shader_module_usable() {
+    // The shader_module field should be present and thus have successfully
+    // compiled from `full_mppi_source()` on the real device.
+    if !gpu_available_or_skip("test_shader_module_usable") {
+        return;
+    }
+    let params = DroneParamsF32::crazyflie();
+    let arena = warehouse_arena_f32();
+    let weights = default_weights();
+
+    let pipeline =
+        GpuBatchMppi::new(4, 32, 10, &params, weights, &arena).expect("pipeline construction");
+
+    let _module: &wgpu::ShaderModule = &pipeline.shader_module;
+}
+
+#[test]
 fn test_pipeline_rejects_too_many_obstacles() {
     if !gpu_available_or_skip("test_pipeline_rejects_too_many_obstacles") {
         return;
