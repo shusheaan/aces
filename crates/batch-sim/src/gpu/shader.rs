@@ -18,11 +18,12 @@
 //!
 //! - [`MPPI_HELPERS_WGSL`] — helpers-only shader source.
 //! - [`MPPI_ROLLOUT_WGSL`] — rollout-kernel shader source.
-//! - [`full_mppi_source`] — concatenation of helpers + rollout, ready to
-//!   feed into `wgpu::ShaderSource::Wgsl`.
+//! - [`MPPI_SOFTMAX_WGSL`] — softmax-reduction kernel shader source.
+//! - [`full_mppi_source`] — concatenation of helpers + rollout + softmax,
+//!   ready to feed into `wgpu::ShaderSource::Wgsl`.
 //! - [`validate_mppi_helpers`] — parse + validate the helpers module.
 //! - [`validate_full_mppi`] — parse + validate the concatenated source
-//!   (helpers + rollout kernel with all bindings).
+//!   (helpers + rollout kernel + softmax kernel with all bindings).
 //! - [`ValidationError`] — a simple `Parse` / `Validate` error enum that
 //!   stringifies naga's internal error types so callers don't have to
 //!   depend on naga details.
@@ -37,23 +38,36 @@ pub const MPPI_HELPERS_WGSL: &str = include_str!("shaders/mppi_helpers.wgsl");
 /// [`MPPI_HELPERS_WGSL`] for standalone use — see [`full_mppi_source`].
 pub const MPPI_ROLLOUT_WGSL: &str = include_str!("shaders/mppi_rollout.wgsl");
 
-/// The full MPPI shader source: helpers first, then the rollout kernel.
+/// The softmax-reduction kernel WGSL source (`softmax_reduce` @compute
+/// entry point + workgroup-shared scratch memory), embedded at compile
+/// time. Reuses the bindings declared in [`MPPI_ROLLOUT_WGSL`] — must
+/// be concatenated after it; see [`full_mppi_source`].
+pub const MPPI_SOFTMAX_WGSL: &str = include_str!("shaders/mppi_softmax.wgsl");
+
+/// The full MPPI shader source: helpers first, then the rollout kernel,
+/// then the softmax-reduction kernel.
 ///
 /// WGSL has no `#include`, so helpers must appear in the same translation
 /// unit as the kernel. The helpers file owns struct definitions
 /// (`DroneParams`, `CostWeights`, `Obstacle`, `DroneState`,
 /// `StateDerivative`) and all 12 helper functions; the rollout file adds
 /// `MppiDims`, the 11 bind-group declarations, stage-cost wrappers, and
-/// the `@compute` entry point.
+/// the `rollout_and_cost` @compute entry point; the softmax file adds
+/// workgroup-shared scratch buffers and the `softmax_reduce` @compute
+/// entry point. Both entry points share the same bindings.
 ///
-/// A newline is inserted between the two files to guard against a file
-/// that ends without one — WGSL otherwise fuses the last token of the
-/// helpers with the first token of the rollout.
+/// A newline is inserted between each file to guard against a file
+/// that ends without one — WGSL otherwise fuses the last token of one
+/// file with the first token of the next.
 pub fn full_mppi_source() -> String {
-    let mut src = String::with_capacity(MPPI_HELPERS_WGSL.len() + MPPI_ROLLOUT_WGSL.len() + 1);
+    let mut src = String::with_capacity(
+        MPPI_HELPERS_WGSL.len() + MPPI_ROLLOUT_WGSL.len() + MPPI_SOFTMAX_WGSL.len() + 2,
+    );
     src.push_str(MPPI_HELPERS_WGSL);
     src.push('\n');
     src.push_str(MPPI_ROLLOUT_WGSL);
+    src.push('\n');
+    src.push_str(MPPI_SOFTMAX_WGSL);
     src
 }
 
@@ -229,17 +243,12 @@ mod tests {
     fn test_mppi_rollout_entry_point_present() {
         let module = validate_full_mppi().expect("full shader validation failed");
 
-        let entries: Vec<&naga::EntryPoint> = module.entry_points.iter().collect();
-        assert_eq!(
-            entries.len(),
-            1,
-            "expected exactly 1 entry point, got {}: {:?}",
-            entries.len(),
-            entries.iter().map(|e| &e.name).collect::<Vec<_>>()
-        );
+        let ep = module
+            .entry_points
+            .iter()
+            .find(|e| e.name == "rollout_and_cost")
+            .expect("entry point `rollout_and_cost` not found");
 
-        let ep = entries[0];
-        assert_eq!(ep.name, "rollout_and_cost", "entry point name mismatch");
         assert_eq!(
             ep.stage,
             naga::ShaderStage::Compute,
@@ -250,6 +259,102 @@ mod tests {
             [1u32, 1u32, 1u32],
             "workgroup_size must be (1,1,1); dispatch is per-sample/per-drone"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Softmax-reduction kernel validation tests.
+    // -----------------------------------------------------------------------
+
+    /// The softmax kernel is declared in a separate WGSL file that is
+    /// concatenated onto the rollout file; it shares the same bindings.
+    /// Confirm naga sees a compute entry point named `softmax_reduce`
+    /// with the expected workgroup size.
+    #[test]
+    fn test_mppi_softmax_entry_point_present() {
+        let module = validate_full_mppi().expect("full shader validation failed");
+
+        let ep = module
+            .entry_points
+            .iter()
+            .find(|e| e.name == "softmax_reduce")
+            .expect("entry point `softmax_reduce` not found");
+
+        assert_eq!(
+            ep.stage,
+            naga::ShaderStage::Compute,
+            "entry point stage must be Compute"
+        );
+        assert_eq!(
+            ep.workgroup_size,
+            [256u32, 1u32, 1u32],
+            "workgroup_size must be (256,1,1); dispatch is per-drone"
+        );
+    }
+
+    /// The concatenated shader should expose exactly two @compute entry
+    /// points: `rollout_and_cost` and `softmax_reduce`. If a future slice
+    /// adds or removes one, this test will flag the change.
+    #[test]
+    fn test_mppi_has_two_entry_points() {
+        let module = validate_full_mppi().expect("full shader validation failed");
+
+        let mut names: Vec<&str> = module
+            .entry_points
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        names.sort();
+
+        assert_eq!(
+            names,
+            vec!["rollout_and_cost", "softmax_reduce"],
+            "expected exactly the two @compute entry points"
+        );
+    }
+
+    /// The softmax kernel declares two workgroup-shared arrays
+    /// (`shared_min`, `shared_sum`), each `array<f32, 256>` = 1024 B.
+    /// Confirm they are present with the expected layout.
+    #[test]
+    fn test_mppi_workgroup_vars_declared() {
+        let module = validate_full_mppi().expect("full shader validation failed");
+
+        let workgroup_vars: Vec<_> = module
+            .global_variables
+            .iter()
+            .filter(|(_, gv)| gv.space == naga::AddressSpace::WorkGroup)
+            .collect();
+
+        assert!(
+            workgroup_vars.len() >= 2,
+            "expected at least 2 workgroup-shared globals (shared_min, shared_sum); found {}: {:?}",
+            workgroup_vars.len(),
+            workgroup_vars
+                .iter()
+                .map(|(_, gv)| gv.name.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // Bonus: each workgroup array should have 256 × 4 = 1024 bytes
+        // of storage (array<f32, 256>). naga stores that span on the
+        // underlying type.
+        for (_, gv) in &workgroup_vars {
+            let ty = &module.types[gv.ty];
+            let span = match &ty.inner {
+                naga::TypeInner::Array { .. } => ty.inner.size(module.to_ctx()),
+                other => panic!(
+                    "workgroup var `{}` is not an array: {other:?}",
+                    gv.name.as_deref().unwrap_or("<unnamed>")
+                ),
+            };
+            assert_eq!(
+                span,
+                1024,
+                "workgroup var `{}` has size {} bytes; expected 1024 (256 × f32)",
+                gv.name.as_deref().unwrap_or("<unnamed>"),
+                span,
+            );
+        }
     }
 
     #[test]

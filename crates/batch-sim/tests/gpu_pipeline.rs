@@ -167,10 +167,22 @@ fn test_pipeline_rejects_too_many_obstacles() {
 
 #[test]
 fn test_mppi_dims_size_is_32() {
-    // MppiDims is a 32-byte uniform (6 scalars + 2 × f32 pad). WGSL
+    // MppiDims is a 32-byte uniform (7 scalars + 1 × f32 pad). WGSL
     // requires uniform-struct size to be a multiple of 16 B.
     assert_eq!(std::mem::size_of::<MppiDims>(), 32);
     assert_eq!(std::mem::size_of::<MppiDims>() % 16, 0);
+}
+
+#[test]
+fn test_mppi_dims_has_temperature() {
+    // `MppiDims::new` must initialise `temperature` to 10.0 to match
+    // `configs/rules.toml [mppi] temperature`. Pure layout/default
+    // check — no GPU needed.
+    let dims = MppiDims::new(4, 64, 20, 10, 5, 0.001);
+    assert_eq!(
+        dims.temperature, 10.0,
+        "MppiDims::new must default temperature to 10.0 (matches rules.toml)"
+    );
 }
 
 #[test]
