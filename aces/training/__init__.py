@@ -25,12 +25,19 @@ from aces.training.opponent_pool import OpponentPool, PoolEntry
 from aces.training.self_play import SelfPlayTrainer
 from aces.training.curriculum_trainer import CurriculumTrainer
 
+try:
+    from aces.training.gpu_vec_env import GpuVecEnv
+except ImportError:
+    GpuVecEnv = None  # type: ignore[assignment,misc]
+
 __all__ = [
     # trainers
     "SelfPlayTrainer",
     "CurriculumTrainer",
     # batched_vec_env
     "BatchedOpponentVecEnv",
+    # gpu_vec_env (optional — None if GPU ext not built)
+    "GpuVecEnv",
     # callbacks
     "CheckpointResumeCallback",
     "EpisodeLoggerCallback",
