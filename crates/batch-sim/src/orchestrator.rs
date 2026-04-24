@@ -196,6 +196,7 @@ impl BatchOrchestrator {
                     arena,
                     batch_config.dt_ctrl,
                     batch_config.substeps,
+                    batch_config.max_steps,
                     rng,
                 );
 
@@ -482,7 +483,7 @@ mod tests {
             reward_config,
         );
 
-        // Run enough steps that episodes should complete (collision or timeout at 1000)
+        // Run enough steps that episodes should complete (collision or timeout at max_steps=50)
         let stats = orch.run(100);
         // At least some steps should have been taken
         assert!(stats.total_steps > 0);

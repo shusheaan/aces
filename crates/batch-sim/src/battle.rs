@@ -200,6 +200,10 @@ impl BattleState {
     }
 
     /// Step physics for both drones with given motor commands.
+    ///
+    /// `max_steps` is the episode timeout (from `BatchConfig::max_steps`):
+    /// when `step_count >= max_steps`, `BattleInfo::timeout` is set and the
+    /// battle is marked `done`.
     #[allow(clippy::too_many_arguments)]
     pub fn step_physics<R: Rng>(
         &mut self,
@@ -209,6 +213,7 @@ impl BattleState {
         arena: &Arena,
         dt_ctrl: f64,
         substeps: usize,
+        max_steps: u32,
         rng: &mut R,
     ) -> BattleInfo {
         let dt_sim = dt_ctrl / substeps as f64;
@@ -244,7 +249,7 @@ impl BattleState {
         let distance = self.state_a.distance_to(&self.state_b);
 
         self.step_count += 1;
-        let timeout = self.step_count >= 1000; // max_steps checked by orchestrator
+        let timeout = self.step_count >= max_steps;
 
         self.done = collision_a || collision_b || kill_a || kill_b || timeout;
 
@@ -419,7 +424,7 @@ mod tests {
         );
 
         let mut rng = rand::thread_rng();
-        let info = battle.step_physics(&motors, &motors, &params, &arena, 0.01, 10, &mut rng);
+        let info = battle.step_physics(&motors, &motors, &params, &arena, 0.01, 10, 1000, &mut rng);
 
         assert!(!info.collision_a);
         assert!(!info.collision_b);
@@ -451,7 +456,8 @@ mod tests {
 
         // Run many steps — drone A will fall and go OOB
         for _ in 0..200 {
-            let info = battle.step_physics(&zero, &motors_b, &params, &arena, 0.01, 10, &mut rng);
+            let info =
+                battle.step_physics(&zero, &motors_b, &params, &arena, 0.01, 10, 1000, &mut rng);
             if info.collision_a {
                 assert!(battle.done);
                 return;

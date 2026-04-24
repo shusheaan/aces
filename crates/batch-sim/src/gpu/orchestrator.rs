@@ -386,6 +386,7 @@ impl GpuBatchOrchestrator {
                     arena,
                     batch_config.dt_ctrl,
                     batch_config.substeps,
+                    batch_config.max_steps,
                     rng,
                 );
 
@@ -880,10 +881,10 @@ mod tests {
         if !gpu_available_or_skip("test_gpu_orchestrator_episode_completes") {
             return;
         }
-        // Note: max_steps is configured at 50 but battle.rs currently hardcodes the
-        // timeout check to step_count >= 1000 — a pre-existing bug shared with the
-        // CPU orchestrator. Episode termination in this test is driven by collision
-        // events from random spawns + MPPI noise, not by the max_steps cap.
+        // max_steps=50 now drives timeout termination (battle.rs respects
+        // BatchConfig::max_steps). Termination may come via either collision
+        // (random spawns + MPPI noise) or the configured timeout, whichever
+        // fires first.
         let batch_config = BatchConfig {
             max_steps: 50,
             ..Default::default()
