@@ -191,6 +191,59 @@ impl GpuBatchOrchestrator {
         self.battles.len()
     }
 
+    /// Reset all battles to fresh random spawns and reset the warm-start
+    /// mean-control buffer back to hover. Returns agent-A observations for
+    /// every battle as f32, shape `[n_battles][21]`.
+    ///
+    /// Intended as the VecEnv-style "initial reset" — no physics step is
+    /// advanced; observations are built directly from the newly spawned
+    /// states with zero lock-on progress and ground-truth visibility.
+    pub fn reset(&mut self) -> Vec<[f32; 21]> {
+        let horizon = self.pipeline.horizon;
+        let drone_stride = horizon * 4;
+        let hover_f32 = self.params.hover_thrust() as f32;
+
+        for (battle, rng) in self.battles.iter_mut().zip(self.rngs.iter_mut()) {
+            battle.reset(
+                &self.arena,
+                &self.lockon_params,
+                self.batch_config.wind_sigma,
+                self.batch_config.wind_theta,
+                rng,
+            );
+        }
+
+        // Warm-start: reset every drone's horizon to hover.
+        for v in self.mean_ctrls.iter_mut() {
+            *v = hover_f32;
+        }
+        debug_assert_eq!(self.mean_ctrls.len(), 2 * self.battles.len() * drone_stride);
+
+        self.battles
+            .iter()
+            .map(|battle| {
+                let visible_ab = aces_sim_core::collision::check_line_of_sight(
+                    &self.arena,
+                    &battle.state_a.position,
+                    &battle.state_b.position,
+                ) == aces_sim_core::collision::Visibility::Visible;
+                let obs = build_observation(
+                    &battle.state_a,
+                    &battle.state_b,
+                    &self.arena,
+                    0.0,
+                    0.0,
+                    visible_ab,
+                );
+                let mut arr = [0.0f32; 21];
+                for (i, v) in obs.iter().enumerate() {
+                    arr[i] = *v as f32;
+                }
+                arr
+            })
+            .collect()
+    }
+
     /// MPPI horizon (inherited from the GPU pipeline).
     pub fn horizon(&self) -> usize {
         self.pipeline.horizon
@@ -572,6 +625,58 @@ mod tests {
                 assert!(c.is_finite(), "mean_ctrl non-finite at step {step}: {c}");
                 assert!(c.abs() < 100.0, "mean_ctrl exploded at step {step}: {c}",);
             }
+        }
+    }
+
+    #[test]
+    fn test_gpu_orchestrator_reset_returns_observations() {
+        if !gpu_available_or_skip("test_gpu_orchestrator_reset_returns_observations") {
+            return;
+        }
+        let mut orch = GpuBatchOrchestrator::new(
+            3,
+            small_batch_config(),
+            RewardConfig::default(),
+            32,
+            5,
+            0.03,
+            99,
+        )
+        .expect("gpu orchestrator builds");
+
+        // Run a few steps so state + warm-start drift away from hover.
+        for _ in 0..5 {
+            let _ = orch.step_all();
+        }
+        let drifted: Vec<f32> = orch.mean_ctrls().to_vec();
+
+        // Reset: should return one obs per battle, all finite, and zero
+        // the lock-on + time-since-seen + belief-var slots.
+        let obs = orch.reset();
+        assert_eq!(obs.len(), 3);
+        for o in &obs {
+            assert_eq!(o.len(), 21);
+            for v in o {
+                assert!(v.is_finite(), "reset obs non-finite: {v}");
+            }
+            // lock_a = obs[16], lock_b = obs[17] must be 0 after reset
+            assert_eq!(o[16], 0.0);
+            assert_eq!(o[17], 0.0);
+            // time_since_last_seen = obs[20] must be 0
+            assert_eq!(o[20], 0.0);
+        }
+        // Warm-start must be hover thrust everywhere after reset.
+        let hover = orch.params.hover_thrust() as f32;
+        for v in orch.mean_ctrls() {
+            assert!((*v - hover).abs() < 1e-6, "warm-start not hover: {v}");
+        }
+        // Sanity: warm-start actually changed across reset (otherwise the
+        // test proves nothing).
+        assert_ne!(drifted, orch.mean_ctrls().to_vec());
+        // Battles must be live.
+        for battle in &orch.battles {
+            assert!(!battle.done);
+            assert_eq!(battle.step_count, 0);
         }
     }
 
