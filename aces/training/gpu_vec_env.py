@@ -8,6 +8,12 @@ by MPPI. This wrapper:
     runs GPU MPPI internally
   - Denormalizes SB3's action space [-1, 1] to motor thrusts [0, max_thrust] before
     passing into the Rust side
+
+CPU-only noise features: The CPU env ``DroneDogfightEnv`` applies additional
+noise not yet ported to batch-sim/GPU: observation noise (``obs_noise_std``),
+motor dynamics (first-order delay, multiplicative noise, bias), and IMU bias
+random walk. These are documented as follow-up work. Only OU wind
+(``wind_sigma`` / ``wind_theta``) is plumbed through to the GPU orchestrator.
 """
 
 from __future__ import annotations
@@ -65,6 +71,24 @@ def denormalize_action(actions: np.ndarray) -> np.ndarray:
     return cast(np.ndarray, clipped)
 
 
+def _load_wind_from_rules() -> dict:
+    """Read OU wind parameters from ``configs/rules.toml`` section ``[noise]``.
+
+    Returns a dict with the two wind floats the Rust GPU orchestrator consumes:
+    ``wind_sigma`` (volatility, N) and ``wind_theta`` (mean-reversion rate).
+    Other ``[noise]`` fields (``obs_noise_std``, motor dynamics, IMU bias) are
+    CPU-only and intentionally not returned — see module docstring.
+    """
+    from aces.config import load_configs
+
+    cfg = load_configs()
+    noise = cfg.rules.noise
+    return {
+        "wind_sigma": float(noise.wind_sigma),
+        "wind_theta": float(noise.wind_theta),
+    }
+
+
 def _load_reward_from_rules() -> dict:
     """Read the 8 reward weights the Rust orchestrator expects from rules.toml.
 
@@ -112,13 +136,19 @@ class GpuVecEnv(VecEnv):
         max_steps: int = 1000,
         dt_ctrl: float = 0.01,
         substeps: int = 10,
-        wind_sigma: float = 0.0,
+        wind_sigma: float | None = None,
+        wind_theta: float | None = None,
         seed: int = 42,
         reward_config: Optional[dict] = None,
     ):
         """Create a GPU-backed VecEnv of N parallel MPPI-vs-PPO battles.
 
         Args:
+            wind_sigma: OU wind volatility (N). When ``None``, reads
+                ``configs/rules.toml`` section ``[noise].wind_sigma`` so GPU
+                training applies the same disturbance as the CPU env.
+            wind_theta: OU mean-reversion rate. When ``None``, reads
+                ``configs/rules.toml`` section ``[noise].wind_theta``.
             reward_config: optional override for the 8 reward weights consumed
                 by the Rust orchestrator. When ``None``, weights are read from
                 ``configs/rules.toml`` section ``[reward]`` so GPU training
@@ -144,6 +174,13 @@ class GpuVecEnv(VecEnv):
         if reward_config is None:
             reward_config = _load_reward_from_rules()
 
+        if wind_sigma is None or wind_theta is None:
+            wind_defaults = _load_wind_from_rules()
+            if wind_sigma is None:
+                wind_sigma = wind_defaults["wind_sigma"]
+            if wind_theta is None:
+                wind_theta = wind_defaults["wind_theta"]
+
         self._rust = _RustGpuVecEnv(
             n_envs=n_envs,
             mppi_samples=mppi_samples,
@@ -153,6 +190,7 @@ class GpuVecEnv(VecEnv):
             dt_ctrl=dt_ctrl,
             substeps=substeps,
             wind_sigma=wind_sigma,
+            wind_theta=wind_theta,
             seed=seed,
             **reward_config,
         )
