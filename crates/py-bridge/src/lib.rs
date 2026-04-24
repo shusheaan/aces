@@ -954,6 +954,189 @@ impl MppiController {
 }
 
 // ---------------------------------------------------------------------------
+// GPU batch MPPI — only compiled with the `gpu` feature.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "gpu")]
+mod gpu_binding {
+    use aces_batch_sim::f32_dynamics::DroneParamsF32;
+    use aces_batch_sim::f32_sdf::{ArenaF32, ObstacleF32};
+    use aces_batch_sim::gpu::pipeline::{CostWeightsGpu, GpuBatchMppi};
+    use nalgebra::Vector3;
+    use numpy::{
+        IntoPyArray, PyArray3, PyArrayMethods, PyReadonlyArray2, PyReadonlyArray3,
+        PyReadonlyArray4, PyUntypedArrayMethods,
+    };
+    use pyo3::exceptions::{PyRuntimeError, PyValueError};
+    use pyo3::prelude::*;
+
+    /// GPU-accelerated batched MPPI optimizer.
+    ///
+    /// Constructs a single `wgpu` device + compiled compute pipeline and runs
+    /// `n_drones` independent MPPI rollouts in parallel on the GPU. Useful
+    /// when training code wants to batch opponent planning across many
+    /// parallel environments without incurring CPU sampling cost.
+    ///
+    /// Defaults:
+    ///   * physics: Crazyflie 2.1
+    ///   * arena:   10x10x3 m warehouse with 5 box pillars
+    ///   * weights: w_dist=1.0, w_face=5.0, w_ctrl=0.01, w_obs=1000.0, d_safe=0.3
+    ///
+    /// GPU init will fail with a `RuntimeError` if no adapter is available
+    /// (e.g. headless server with no GPU drivers).
+    #[pyclass(name = "GpuBatchMppi")]
+    pub struct PyGpuBatchMppi {
+        inner: GpuBatchMppi,
+    }
+
+    #[pymethods]
+    impl PyGpuBatchMppi {
+        #[new]
+        #[pyo3(signature = (n_drones, n_samples, horizon))]
+        fn new(n_drones: usize, n_samples: usize, horizon: usize) -> PyResult<Self> {
+            let params = DroneParamsF32::crazyflie();
+            let arena = default_warehouse_arena();
+            let weights = CostWeightsGpu::new(
+                1.0,
+                5.0,
+                0.01,
+                1000.0,
+                0.3,
+                params.hover_thrust(),
+                [10.0, 10.0, 3.0],
+            );
+            let inner = GpuBatchMppi::new(n_drones, n_samples, horizon, &params, weights, &arena)
+                .map_err(|e| {
+                PyRuntimeError::new_err(format!("GpuBatchMppi init failed: {e}"))
+            })?;
+            Ok(PyGpuBatchMppi { inner })
+        }
+
+        #[getter]
+        fn n_drones(&self) -> usize {
+            self.inner.n_drones
+        }
+
+        #[getter]
+        fn n_samples(&self) -> usize {
+            self.inner.n_samples
+        }
+
+        #[getter]
+        fn horizon(&self) -> usize {
+            self.inner.horizon
+        }
+
+        /// Run one full MPPI iteration on the GPU.
+        ///
+        /// Arguments:
+        ///   states:     float32 array shape (n_drones, 13)
+        ///   enemies:    float32 array shape (n_drones, 13)
+        ///   mean_ctrls: float32 array shape (n_drones, horizon, 4)
+        ///   noise:      float32 array shape (n_drones, n_samples, horizon, 4)
+        ///
+        /// Returns:
+        ///   new_mean_ctrls: float32 array shape (n_drones, horizon, 4)
+        ///
+        /// # Thread safety
+        /// A single `GpuBatchMppi` instance must NOT be called concurrently from
+        /// multiple Python threads. The method releases the GIL during GPU dispatch,
+        /// but all calls on the same instance share the same GPU buffers — concurrent
+        /// calls will corrupt the staging state and produce wrong results silently.
+        /// Use one instance per thread, or serialize calls via a Python lock.
+        fn compute_batch_actions<'py>(
+            &self,
+            py: Python<'py>,
+            states: PyReadonlyArray2<'py, f32>,
+            enemies: PyReadonlyArray2<'py, f32>,
+            mean_ctrls: PyReadonlyArray3<'py, f32>,
+            noise: PyReadonlyArray4<'py, f32>,
+        ) -> PyResult<Bound<'py, PyArray3<f32>>> {
+            let n_drones = self.inner.n_drones;
+            let n_samples = self.inner.n_samples;
+            let horizon = self.inner.horizon;
+
+            // Validate shapes.
+            let states_shape = states.shape();
+            if states_shape != [n_drones, 13] {
+                return Err(PyValueError::new_err(format!(
+                    "states shape {:?} != ({}, 13)",
+                    states_shape, n_drones
+                )));
+            }
+            if enemies.shape() != [n_drones, 13] {
+                return Err(PyValueError::new_err(format!(
+                    "enemies shape {:?} != ({}, 13)",
+                    enemies.shape(),
+                    n_drones
+                )));
+            }
+            if mean_ctrls.shape() != [n_drones, horizon, 4] {
+                return Err(PyValueError::new_err(format!(
+                    "mean_ctrls shape {:?} != ({}, {}, 4)",
+                    mean_ctrls.shape(),
+                    n_drones,
+                    horizon
+                )));
+            }
+            if noise.shape() != [n_drones, n_samples, horizon, 4] {
+                return Err(PyValueError::new_err(format!(
+                    "noise shape {:?} != ({}, {}, {}, 4)",
+                    noise.shape(),
+                    n_drones,
+                    n_samples,
+                    horizon
+                )));
+            }
+
+            // Materialize into contiguous f32 vecs; `.iter().copied()` on an
+            // ndarray view walks in row-major regardless of memory layout,
+            // which matches the GPU shader's indexing convention.
+            let states_vec: Vec<f32> = states.as_array().iter().copied().collect();
+            let enemies_vec: Vec<f32> = enemies.as_array().iter().copied().collect();
+            let mean_ctrls_vec: Vec<f32> = mean_ctrls.as_array().iter().copied().collect();
+            let noise_vec: Vec<f32> = noise.as_array().iter().copied().collect();
+
+            // Release the GIL during GPU work so other Python threads can run.
+            let result = py.allow_threads(|| {
+                self.inner.compute_batch_actions(
+                    &states_vec,
+                    &enemies_vec,
+                    &mean_ctrls_vec,
+                    &noise_vec,
+                )
+            });
+
+            // Build the output as a 1-D numpy array and reshape to
+            // (n_drones, horizon, 4). `into_pyarray` consumes `result` with
+            // no extra copy.
+            let arr1 = result.into_pyarray(py);
+            arr1.reshape([n_drones, horizon, 4])
+                .map_err(|e| PyRuntimeError::new_err(format!("reshape failed: {e}")))
+        }
+    }
+
+    /// 10x10x3 warehouse with 5 box pillars — matches the default arena
+    /// used by the Python dogfight env so out-of-the-box numerics line up.
+    fn default_warehouse_arena() -> ArenaF32 {
+        let mut arena = ArenaF32::new(Vector3::new(10.0, 10.0, 3.0));
+        for (x, y) in [
+            (2.0f32, 2.0f32),
+            (2.0, 8.0),
+            (5.0, 5.0),
+            (8.0, 2.0),
+            (8.0, 8.0),
+        ] {
+            arena.obstacles.push(ObstacleF32::Box {
+                center: Vector3::new(x, y, 1.5),
+                half_extents: Vector3::new(0.5, 0.5, 1.5),
+            });
+        }
+        arena
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
 
@@ -963,5 +1146,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StepResult>()?;
     m.add_class::<Simulation>()?;
     m.add_class::<MppiController>()?;
+
+    #[cfg(feature = "gpu")]
+    m.add_class::<gpu_binding::PyGpuBatchMppi>()?;
+
     Ok(())
 }

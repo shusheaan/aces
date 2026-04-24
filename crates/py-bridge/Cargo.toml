@@ -11,6 +11,12 @@ crate-type = ["cdylib"]
 aces-sim-core = { path = "../sim-core" }
 aces-mppi = { path = "../mppi" }
 aces-estimator = { path = "../estimator" }
+aces-batch-sim = { path = "../batch-sim", optional = true }
 pyo3 = { workspace = true }
 nalgebra = { workspace = true }
 rand = { workspace = true }
+numpy = { workspace = true, optional = true }
+
+[features]
+default = []
+gpu = ["dep:aces-batch-sim", "aces-batch-sim/gpu", "dep:numpy"]
