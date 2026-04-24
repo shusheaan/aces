@@ -1,5 +1,15 @@
 # GPU MPPI — User Guide
 
+## Quick setup verification
+
+Run this one command to validate your entire setup:
+
+    bash scripts/check_gpu_setup.sh
+
+It reports OK / FAIL / SKIP for each stage: cargo toolchain, GPU adapter probe,
+Rust tests, Python extension, Python smoke tests. Exits 0 if everything that
+can work does; exits 1 on hard failures with diagnostics.
+
 ## Purpose
 
 The GPU MPPI subsystem runs many parallel quadrotor dogfight simulations on the
