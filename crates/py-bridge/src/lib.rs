@@ -959,16 +959,20 @@ impl MppiController {
 
 #[cfg(feature = "gpu")]
 mod gpu_binding {
+    use aces_batch_sim::battle::BatchConfig;
     use aces_batch_sim::f32_dynamics::DroneParamsF32;
     use aces_batch_sim::f32_sdf::{ArenaF32, ObstacleF32};
+    use aces_batch_sim::gpu::orchestrator::GpuBatchOrchestrator;
     use aces_batch_sim::gpu::pipeline::{CostWeightsGpu, GpuBatchMppi};
+    use aces_batch_sim::reward::RewardConfig;
     use nalgebra::Vector3;
     use numpy::{
-        IntoPyArray, PyArray3, PyArrayMethods, PyReadonlyArray2, PyReadonlyArray3,
-        PyReadonlyArray4, PyUntypedArrayMethods,
+        IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2,
+        PyReadonlyArray3, PyReadonlyArray4, PyUntypedArrayMethods,
     };
     use pyo3::exceptions::{PyRuntimeError, PyValueError};
     use pyo3::prelude::*;
+    use pyo3::types::{PyDict, PyList};
 
     /// GPU-accelerated batched MPPI optimizer.
     ///
@@ -1116,6 +1120,171 @@ mod gpu_binding {
         }
     }
 
+    // -----------------------------------------------------------------
+    // GpuVecEnv — VecEnv-style wrapper around GpuBatchOrchestrator.
+    // Runs N parallel battles with GPU MPPI driving both sides.
+    // -----------------------------------------------------------------
+
+    /// Vectorized MPPI-vs-MPPI battle environment backed by a single
+    /// `GpuBatchOrchestrator`.
+    ///
+    /// Each `step()` runs one GPU MPPI dispatch for every drone in every
+    /// battle and advances physics in parallel. Observations are the
+    /// agent-A side only (21-dim per battle), suitable for dropping into
+    /// a Gymnasium / Stable-Baselines3 VecEnv pipeline.
+    ///
+    /// External agent actions are not supported yet — this is the
+    /// pure MPPI-vs-MPPI slice.
+    #[pyclass(name = "GpuVecEnv")]
+    pub struct PyGpuVecEnv {
+        inner: GpuBatchOrchestrator,
+        n_envs: usize,
+    }
+
+    #[pymethods]
+    impl PyGpuVecEnv {
+        #[new]
+        #[pyo3(signature = (
+            n_envs,
+            mppi_samples = 128,
+            mppi_horizon = 15,
+            noise_std = 0.03,
+            max_steps = 1000,
+            dt_ctrl = 0.01,
+            substeps = 10,
+            wind_sigma = 0.0,
+            seed = 42,
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        fn new(
+            n_envs: usize,
+            mppi_samples: usize,
+            mppi_horizon: usize,
+            noise_std: f32,
+            max_steps: u32,
+            dt_ctrl: f64,
+            substeps: usize,
+            wind_sigma: f64,
+            seed: u64,
+        ) -> PyResult<Self> {
+            if n_envs == 0 {
+                return Err(PyValueError::new_err("n_envs must be > 0"));
+            }
+            let batch_config = BatchConfig {
+                max_steps,
+                dt_ctrl,
+                substeps,
+                wind_sigma,
+                wind_theta: 2.0,
+            };
+            let reward_config = RewardConfig::default();
+            let inner = GpuBatchOrchestrator::new(
+                n_envs,
+                batch_config,
+                reward_config,
+                mppi_samples,
+                mppi_horizon,
+                noise_std,
+                seed,
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("GpuVecEnv init failed: {e}")))?;
+            Ok(PyGpuVecEnv { inner, n_envs })
+        }
+
+        #[getter]
+        fn n_envs(&self) -> usize {
+            self.n_envs
+        }
+
+        #[getter]
+        fn horizon(&self) -> usize {
+            self.inner.horizon()
+        }
+
+        #[getter]
+        fn n_samples(&self) -> usize {
+            self.inner.n_samples()
+        }
+
+        /// Reset all battles to fresh random spawns. Returns agent-A
+        /// observations as a float32 ndarray of shape `(n_envs, 21)`.
+        fn reset<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+            let obs_rows = py.allow_threads(|| self.inner.reset());
+            let mut flat = Vec::with_capacity(self.n_envs * 21);
+            for row in &obs_rows {
+                flat.extend_from_slice(row);
+            }
+            let arr1 = flat.into_pyarray(py);
+            arr1.reshape([self.n_envs, 21])
+                .map_err(|e| PyRuntimeError::new_err(format!("reshape failed: {e}")))
+        }
+
+        /// Step every battle once using GPU MPPI for both sides.
+        ///
+        /// Returns `(obs, rewards, dones, infos)` where:
+        ///   * obs:     float32 ndarray shape `(n_envs, 21)`
+        ///   * rewards: float32 ndarray shape `(n_envs,)` — agent A reward
+        ///   * dones:   bool ndarray shape `(n_envs,)`
+        ///   * infos:   Python list of dicts with
+        ///              `{distance, lock_a, lock_b, visible, step}`
+        ///
+        /// Note: the underlying `GpuBatchOrchestrator` resets terminated
+        /// battles in place — the returned observation for a done env is
+        /// the *pre-reset* observation (Gymnasium's "terminal observation"
+        /// convention). Downstream VecEnv wrappers that need the next
+        /// reset obs can call `reset()` themselves when `dones[i]`.
+        #[allow(clippy::type_complexity)]
+        fn step<'py>(
+            &mut self,
+            py: Python<'py>,
+        ) -> PyResult<(
+            Bound<'py, PyArray2<f32>>,
+            Bound<'py, PyArray1<f32>>,
+            Bound<'py, PyArray1<bool>>,
+            Bound<'py, PyList>,
+        )> {
+            let step_results = py.allow_threads(|| self.inner.step_all());
+            let n = step_results.len();
+            debug_assert_eq!(n, self.n_envs);
+
+            let mut obs = Vec::with_capacity(n * 21);
+            let mut rewards = Vec::with_capacity(n);
+            let mut dones = Vec::with_capacity(n);
+
+            for r in &step_results {
+                for j in 0..21 {
+                    obs.push(r.obs_a[j] as f32);
+                }
+                rewards.push(r.reward_a as f32);
+                dones.push(r.done);
+            }
+
+            let py_obs_1d = obs.into_pyarray(py);
+            let py_obs = py_obs_1d
+                .reshape([n, 21])
+                .map_err(|e| PyRuntimeError::new_err(format!("reshape failed: {e}")))?;
+            let py_rewards = rewards.into_pyarray(py);
+            let py_dones = dones.into_pyarray(py);
+
+            let infos = PyList::empty(py);
+            for r in &step_results {
+                let d = PyDict::new(py);
+                d.set_item("distance", r.info.distance)?;
+                d.set_item("lock_a", r.info.lock_progress_a)?;
+                d.set_item("lock_b", r.info.lock_progress_b)?;
+                d.set_item("visible", r.info.visible_ab)?;
+                d.set_item("kill_a", r.info.kill_a)?;
+                d.set_item("kill_b", r.info.kill_b)?;
+                d.set_item("collision_a", r.info.collision_a)?;
+                d.set_item("collision_b", r.info.collision_b)?;
+                d.set_item("timeout", r.info.timeout)?;
+                infos.append(d)?;
+            }
+
+            Ok((py_obs, py_rewards, py_dones, infos))
+        }
+    }
+
     /// 10x10x3 warehouse with 5 box pillars — matches the default arena
     /// used by the Python dogfight env so out-of-the-box numerics line up.
     fn default_warehouse_arena() -> ArenaF32 {
@@ -1149,6 +1318,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "gpu")]
     m.add_class::<gpu_binding::PyGpuBatchMppi>()?;
+
+    #[cfg(feature = "gpu")]
+    m.add_class::<gpu_binding::PyGpuVecEnv>()?;
 
     Ok(())
 }
