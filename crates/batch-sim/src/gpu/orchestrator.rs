@@ -580,8 +580,10 @@ mod tests {
         if !gpu_available_or_skip("test_gpu_orchestrator_episode_completes") {
             return;
         }
-        // Short max_steps so at least one episode is guaranteed to end via
-        // timeout within the 500-step cap.
+        // Note: max_steps is configured at 50 but battle.rs currently hardcodes the
+        // timeout check to step_count >= 1000 — a pre-existing bug shared with the
+        // CPU orchestrator. Episode termination in this test is driven by collision
+        // events from random spawns + MPPI noise, not by the max_steps cap.
         let batch_config = BatchConfig {
             max_steps: 50,
             ..Default::default()
