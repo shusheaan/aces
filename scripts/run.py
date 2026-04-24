@@ -314,6 +314,12 @@ def main():
         default=0.03,
         help="MPPI noise std for GPU env (default: 0.03)",
     )
+    parser.add_argument(
+        "--n-envs",
+        type=int,
+        default=8,
+        help="Number of parallel envs (applies to both CPU SubprocVecEnv and GPU VecEnv paths; default: 8)",
+    )
 
     # Evaluate mode
     parser.add_argument("--model-path", default="aces_model")
@@ -362,6 +368,7 @@ def main():
             save_dir=args.save_path,
             wind_sigma=wind_sigma,
             obs_noise_std=obs_noise_std,
+            n_envs=args.n_envs,
             use_gpu_env=args.use_gpu_env,
             gpu_mppi_samples=args.gpu_mppi_samples,
             gpu_mppi_horizon=args.gpu_mppi_horizon,

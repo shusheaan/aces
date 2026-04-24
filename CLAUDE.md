@@ -30,6 +30,7 @@ aces/
 │   │   ├── curriculum_trainer.py #   Curriculum-based multi-phase trainer
 │   │   ├── callbacks.py        #     SB3 training callbacks
 │   │   ├── evaluate.py         #     Model evaluation utilities
+│   │   ├── gpu_vec_env.py          #     GPU-backed SB3 VecEnv wrapper
 │   │   ├── opponent_pool.py    #     Elo-rated opponent pool
 │   │   ├── batched_vec_env.py  #     Batched opponent inference VecEnv
 │   │   └── logging.py          #     Structured logging + run metadata
