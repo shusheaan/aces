@@ -598,6 +598,206 @@ impl GpuBatchMppi {
         self.queue
             .write_buffer(&self.dims_uniform, 0, bytemuck::bytes_of(&dims));
     }
+
+    /// Run one full MPPI iteration on the GPU: rollout + softmax-weighted mean.
+    ///
+    /// Inputs: current state per drone, enemy state per drone, warm-start mean
+    /// control sequence per drone, pre-generated noise per (drone, sample,
+    /// horizon).
+    ///
+    /// Returns the new optimal mean control sequence per drone, shape
+    /// `[n_drones][horizon][4]` flattened row-major.
+    ///
+    /// Pipeline:
+    ///   1. Upload `states`, `enemies`, `mean_ctrls`, `noise` to their
+    ///      respective storage buffers.
+    ///   2. Build a `BindGroup` for all 11 bindings.
+    ///   3. Dispatch `rollout_pipeline` with `(n_samples, n_drones, 1)`
+    ///      workgroups (matches kernel: `wid.x=sample`, `wid.y=drone`).
+    ///   4. Dispatch `softmax_pipeline` with `(n_drones, 1, 1)` workgroups
+    ///      (matches kernel: `wid.x=drone`).
+    ///   5. Copy `result_buffer` into a staging buffer, submit, map-read.
+    ///
+    /// # Panics
+    /// Panics if the input slice lengths don't match the configured
+    /// dimensions.
+    pub fn compute_batch_actions(
+        &self,
+        states: &[f32],
+        enemies: &[f32],
+        mean_ctrls: &[f32],
+        noise: &[f32],
+    ) -> Vec<f32> {
+        // -----------------------------------------------------------------
+        // 1. Validate input lengths.
+        // -----------------------------------------------------------------
+        let expected_states = self.n_drones * STATE_DIM;
+        let expected_enemies = self.n_drones * STATE_DIM;
+        let expected_mean_ctrls = self.n_drones * self.horizon * 4;
+        let expected_noise = self.n_drones * self.n_samples * self.horizon * 4;
+        let expected_result = self.n_drones * self.horizon * 4;
+
+        assert_eq!(
+            states.len(),
+            expected_states,
+            "states len {} != expected n_drones * 13 = {}",
+            states.len(),
+            expected_states,
+        );
+        assert_eq!(
+            enemies.len(),
+            expected_enemies,
+            "enemies len {} != expected n_drones * 13 = {}",
+            enemies.len(),
+            expected_enemies,
+        );
+        assert_eq!(
+            mean_ctrls.len(),
+            expected_mean_ctrls,
+            "mean_ctrls len {} != expected n_drones * horizon * 4 = {}",
+            mean_ctrls.len(),
+            expected_mean_ctrls,
+        );
+        assert_eq!(
+            noise.len(),
+            expected_noise,
+            "noise len {} != expected n_drones * n_samples * horizon * 4 = {}",
+            noise.len(),
+            expected_noise,
+        );
+
+        // -----------------------------------------------------------------
+        // 2. Upload inputs.
+        // -----------------------------------------------------------------
+        self.queue
+            .write_buffer(&self.states_buffer, 0, bytemuck::cast_slice(states));
+        self.queue
+            .write_buffer(&self.enemies_buffer, 0, bytemuck::cast_slice(enemies));
+        self.queue
+            .write_buffer(&self.mean_ctrls_buffer, 0, bytemuck::cast_slice(mean_ctrls));
+        self.queue
+            .write_buffer(&self.noise_buffer, 0, bytemuck::cast_slice(noise));
+
+        // -----------------------------------------------------------------
+        // 3. Create the BindGroup for this dispatch. Cheap — just a handle.
+        // -----------------------------------------------------------------
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mppi.compute_batch_actions.bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.states_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.enemies_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.mean_ctrls_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.noise_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.costs_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.ctrls_out_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.result_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.params_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.weights_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: self.obstacles_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: self.dims_uniform.as_entire_binding(),
+                },
+            ],
+        });
+
+        // -----------------------------------------------------------------
+        // 4. Record the compute dispatches + result copy.
+        // -----------------------------------------------------------------
+        let result_size_bytes = (expected_result * std::mem::size_of::<f32>()) as u64;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mppi.compute_batch_actions.staging"),
+            size: result_size_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mppi.compute_batch_actions.encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mppi.rollout"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.rollout_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            // Kernel convention: wid.x = sample, wid.y = drone.
+            pass.dispatch_workgroups(self.n_samples as u32, self.n_drones as u32, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mppi.softmax"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.softmax_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            // Kernel convention: wid.x = drone.
+            pass.dispatch_workgroups(self.n_drones as u32, 1, 1);
+        }
+
+        // copy_buffer_to_buffer must be outside a compute pass.
+        encoder.copy_buffer_to_buffer(&self.result_buffer, 0, &staging, 0, result_size_bytes);
+
+        // -----------------------------------------------------------------
+        // 5. Submit + map-read.
+        // -----------------------------------------------------------------
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = sender.send(res);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .expect("map_async channel closed")
+            .expect("staging buffer map_async failed");
+
+        let result: Vec<f32> = {
+            let data = slice.get_mapped_range();
+            bytemuck::cast_slice::<u8, f32>(&data).to_vec()
+        };
+        staging.unmap();
+
+        result
+    }
 }
 
 #[cfg(test)]
