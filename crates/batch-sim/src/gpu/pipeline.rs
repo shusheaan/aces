@@ -155,9 +155,14 @@ pub struct ObstacleGpu {
 /// [`DroneParamsGpu`] so callers can retune `substeps` / `dt_sim` at
 /// runtime without re-uploading physical parameters.
 ///
-/// Exactly 32 bytes: six scalars (24 B) plus two trailing f32 pads to keep
-/// the size a multiple of 16 (WGSL uniform alignment rule). All padding is
-/// explicit so `bytemuck::Pod` accepts the type.
+/// The `temperature` field (lambda in the CPU code) parameterises the
+/// softmax weighting applied by the `softmax_reduce` kernel:
+/// `w[k] ∝ exp(-(c[k] - c_min) / T)`. Defaults to `10.0` to match
+/// `configs/rules.toml [mppi] temperature`.
+///
+/// Exactly 32 bytes: seven scalars (28 B) plus one trailing f32 pad to
+/// keep the size a multiple of 16 (WGSL uniform alignment rule). The
+/// padding field is explicit so `bytemuck::Pod` accepts the type.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct MppiDims {
@@ -167,18 +172,21 @@ pub struct MppiDims {
     pub substeps: u32,
     pub n_obstacles: u32,
     pub dt_sim: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    /// MPPI softmax temperature (lambda). Matches `configs/rules.toml
+    /// [mppi] temperature` — default `10.0`.
+    pub temperature: f32,
+    pub _pad: f32,
 }
 
 impl MppiDims {
     /// Construct `MppiDims` from high-level rollout parameters. Defaults
     /// used by [`GpuBatchMppi::new`]:
-    ///   * `substeps = 10` (10 × 0.001 s = 10 ms control tick)
-    ///   * `dt_sim   = 0.001` s (1 kHz physics)
+    ///   * `substeps    = 10` (10 × 0.001 s = 10 ms control tick)
+    ///   * `dt_sim      = 0.001` s (1 kHz physics)
+    ///   * `temperature = 10.0` (MPPI lambda; matches rules.toml)
     ///
-    /// Callers that need to retune the physics step can build an
-    /// `MppiDims` directly and push it via
+    /// Callers that need to retune the physics step or softmax
+    /// temperature can build an `MppiDims` directly and push it via
     /// [`GpuBatchMppi::update_dims`].
     pub fn new(
         n_drones: u32,
@@ -195,8 +203,8 @@ impl MppiDims {
             substeps,
             n_obstacles,
             dt_sim,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            temperature: 10.0,
+            _pad: 0.0,
         }
     }
 }

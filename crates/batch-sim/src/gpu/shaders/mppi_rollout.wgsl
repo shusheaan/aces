@@ -46,8 +46,10 @@ struct MppiDims {
     substeps: u32,
     n_obstacles: u32,
     dt_sim: f32,
-    _pad0: f32,
-    _pad1: f32,
+    // MPPI softmax temperature (lambda). Consumed by `softmax_reduce`
+    // (see `mppi_softmax.wgsl`).
+    temperature: f32,
+    _pad: f32,
 }
 
 // ---------------------------------------------------------------------------
