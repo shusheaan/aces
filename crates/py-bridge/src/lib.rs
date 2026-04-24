@@ -1007,7 +1007,7 @@ mod gpu_binding {
             );
             let inner = GpuBatchMppi::new(n_drones, n_samples, horizon, &params, weights, &arena)
                 .map_err(|e| {
-                PyRuntimeError::new_err(format!("GpuBatchMppi init failed: {e:?}"))
+                PyRuntimeError::new_err(format!("GpuBatchMppi init failed: {e}"))
             })?;
             Ok(PyGpuBatchMppi { inner })
         }
@@ -1037,6 +1037,13 @@ mod gpu_binding {
         ///
         /// Returns:
         ///   new_mean_ctrls: float32 array shape (n_drones, horizon, 4)
+        ///
+        /// # Thread safety
+        /// A single `GpuBatchMppi` instance must NOT be called concurrently from
+        /// multiple Python threads. The method releases the GIL during GPU dispatch,
+        /// but all calls on the same instance share the same GPU buffers — concurrent
+        /// calls will corrupt the staging state and produce wrong results silently.
+        /// Use one instance per thread, or serialize calls via a Python lock.
         fn compute_batch_actions<'py>(
             &self,
             py: Python<'py>,

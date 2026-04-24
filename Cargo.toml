@@ -20,6 +20,7 @@ rand = { version = "0.8", features = ["small_rng"] }
 rand_distr = "0.4"
 rayon = "1.10"
 pyo3 = { version = "0.25", features = ["extension-module"] }
+numpy = "0.25"
 approx = "0.5"
 bevy = "0.15"
 toml = "0.8"
