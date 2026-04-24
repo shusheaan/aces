@@ -51,7 +51,7 @@ pub const MPPI_SOFTMAX_WGSL: &str = include_str!("shaders/mppi_softmax.wgsl");
 /// unit as the kernel. The helpers file owns struct definitions
 /// (`DroneParams`, `CostWeights`, `Obstacle`, `DroneState`,
 /// `StateDerivative`) and all 12 helper functions; the rollout file adds
-/// `MppiDims`, the 11 bind-group declarations, stage-cost wrappers, and
+/// `MppiDims`, the 12 bind-group declarations, stage-cost wrappers, and
 /// the `rollout_and_cost` @compute entry point; the softmax file adds
 /// workgroup-shared scratch buffers and the `softmax_reduce` @compute
 /// entry point. Both entry points share the same bindings.

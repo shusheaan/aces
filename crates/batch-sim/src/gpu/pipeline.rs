@@ -495,7 +495,8 @@ impl GpuBatchMppi {
         // obstacles are uploaded once and only read by the shader — no COPY_SRC needed
         let obstacles_buffer = make_buf("mppi.obstacles", obstacles_size, obstacles_usage);
         let dims_uniform = make_buf("mppi.dims", dims_uniform_size, uniform_usage);
-        // Wind buffer: host-updated each tick via `set_wind`. STORAGE + COPY_DST.
+        // Wind buffer: host-updated each tick via `set_wind`. STORAGE + COPY_DST
+        // — host-updated each tick via `set_wind`; no COPY_SRC needed (read-only from shader).
         let wind_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let wind_buffer = make_buf("mppi.wind", wind_size, wind_usage);
 
