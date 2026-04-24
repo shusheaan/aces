@@ -216,7 +216,11 @@ fn sim_step(mut sim: ResMut<SimState>, cmd: Res<DroneCommand>, active: Res<Activ
             ActiveDrone::A => (&s.state_b, &s.state_a, lock_b_p, lock_a_p),
             ActiveDrone::B => (&s.state_a, &s.state_b, lock_a_p, lock_b_p),
         };
-        let obs_dist = s.arena.obstacle_sdf(&ai_own.position);
+        // Use the combined arena SDF (boundary ∪ obstacles) to match the
+        // canonical observation build used by batch-sim and py-bridge. The
+        // old `obstacle_sdf` returned +inf in empty arenas, which diverged
+        // from what the trained policy was fed at training time.
+        let obs_dist = s.arena.sdf(&ai_own.position);
         let obs = policy::build_obs(ai_own, ai_opp, obs_dist, lock_p, locked_p);
 
         // SAFETY: guarded by has_perception above.
@@ -259,7 +263,9 @@ fn sim_step(mut sim: ResMut<SimState>, cmd: Res<DroneCommand>, active: Res<Activ
             ActiveDrone::A => (&s.state_b, &s.state_a, lock_b_p, lock_a_p),
             ActiveDrone::B => (&s.state_a, &s.state_b, lock_a_p, lock_b_p),
         };
-        let obs_dist = s.arena.obstacle_sdf(&ai_own.position);
+        // Use the combined arena SDF (boundary ∪ obstacles) to match the
+        // canonical observation build used by batch-sim and py-bridge.
+        let obs_dist = s.arena.sdf(&ai_own.position);
         let obs = policy::build_obs(ai_own, ai_opp, obs_dist, lock_p, locked_p);
         let action = nn.infer(&obs);
         let m = nn.action_to_motors(&action);
