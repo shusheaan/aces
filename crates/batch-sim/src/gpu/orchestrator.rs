@@ -260,19 +260,19 @@ impl GpuBatchOrchestrator {
         &self.mean_ctrls
     }
 
-    /// Step all battles once: GPU MPPI action selection → parallel physics →
-    /// observations + rewards → per-battle reset on termination.
+    /// Pack states, sample noise, and dispatch the GPU MPPI pipeline.
     ///
-    /// Returns one `StepResult` per battle.
-    pub fn step_all(&mut self) -> Vec<StepResult> {
+    /// Returns the newly optimized mean control sequences for all `2*n_battles`
+    /// drones, shape `[2*n_battles][horizon][4]` flattened row-major. Shared
+    /// between [`Self::step_all`] and [`Self::step_with_agent_a_actions`] so
+    /// the dispatch logic stays in one place.
+    fn pack_and_dispatch_gpu_mppi(&mut self) -> Vec<f32> {
         let n_battles = self.battles.len();
         let n_drones = 2 * n_battles;
         let horizon = self.pipeline.horizon;
         let n_samples = self.pipeline.n_samples;
 
-        // -----------------------------------------------------------------
         // 1. Pack current states + paired enemy states into flat f32 buffers.
-        // -----------------------------------------------------------------
         let mut states = vec![0.0f32; n_drones * STATE_DIM];
         let mut enemies = vec![0.0f32; n_drones * STATE_DIM];
         for (b, battle) in self.battles.iter().enumerate() {
@@ -296,9 +296,7 @@ impl GpuBatchOrchestrator {
             );
         }
 
-        // -----------------------------------------------------------------
         // 2. Sample Gaussian noise.
-        // -----------------------------------------------------------------
         let noise_len = n_drones * n_samples * horizon * 4;
         let normal = Normal::new(0.0f32, self.noise_std).expect("valid noise_std");
         let mut noise = Vec::with_capacity(noise_len);
@@ -306,41 +304,30 @@ impl GpuBatchOrchestrator {
             noise.push(normal.sample(&mut self.noise_rng));
         }
 
-        // -----------------------------------------------------------------
         // 3. One GPU dispatch, producing new optimal mean control sequences.
-        // -----------------------------------------------------------------
-        let new_mean =
-            self.pipeline
-                .compute_batch_actions(&states, &enemies, &self.mean_ctrls, &noise);
+        self.pipeline
+            .compute_batch_actions(&states, &enemies, &self.mean_ctrls, &noise)
+    }
 
-        // -----------------------------------------------------------------
-        // 4. Pull motor[0] out of each drone's returned horizon. Step 4's
-        //    output is the action applied at the current control tick.
-        // -----------------------------------------------------------------
+    /// Run physics + observations + rewards for every battle in parallel
+    /// given per-battle agent-A and agent-B motor commands, then warm-start
+    /// shift and reset terminated battles.
+    ///
+    /// `new_mean` is used for warm-start bookkeeping (the GPU-optimized
+    /// sequences). `motors_a_vec` / `motors_b_vec` are the actual motor
+    /// commands applied to physics — these may differ from `new_mean[.., 0]`
+    /// when an external agent overrides one side (PPO-vs-MPPI mode).
+    fn apply_physics_and_warm_start(
+        &mut self,
+        new_mean: Vec<f32>,
+        motors_a_vec: Vec<Vector4<f64>>,
+        motors_b_vec: Vec<Vector4<f64>>,
+    ) -> Vec<StepResult> {
+        let n_battles = self.battles.len();
+        let n_drones = 2 * n_battles;
+        let horizon = self.pipeline.horizon;
         let drone_stride = horizon * 4;
-        let mut motors_a_vec: Vec<Vector4<f64>> = Vec::with_capacity(n_battles);
-        let mut motors_b_vec: Vec<Vector4<f64>> = Vec::with_capacity(n_battles);
-        for b in 0..n_battles {
-            let base_a = 2 * b * drone_stride;
-            let base_b = (2 * b + 1) * drone_stride;
-            motors_a_vec.push(Vector4::new(
-                new_mean[base_a] as f64,
-                new_mean[base_a + 1] as f64,
-                new_mean[base_a + 2] as f64,
-                new_mean[base_a + 3] as f64,
-            ));
-            motors_b_vec.push(Vector4::new(
-                new_mean[base_b] as f64,
-                new_mean[base_b + 1] as f64,
-                new_mean[base_b + 2] as f64,
-                new_mean[base_b + 3] as f64,
-            ));
-        }
 
-        // -----------------------------------------------------------------
-        // 5. Physics + observations + rewards in parallel (matches CPU
-        //    orchestrator).
-        // -----------------------------------------------------------------
         let arena = &self.arena;
         let params = &self.params;
         let batch_config = &self.batch_config;
@@ -440,10 +427,8 @@ impl GpuBatchOrchestrator {
             })
             .collect();
 
-        // -----------------------------------------------------------------
-        // 6. Warm-start shift: drop the applied step, append hover. This
-        //    matches the CPU MPPI behavior in `optimizer.rs`.
-        // -----------------------------------------------------------------
+        // Warm-start shift: drop the applied step, append hover. Matches the
+        // CPU MPPI behavior in `optimizer.rs`.
         let hover_f32 = hover_thrust as f32;
         for d in 0..n_drones {
             let base = d * drone_stride;
@@ -462,10 +447,8 @@ impl GpuBatchOrchestrator {
             self.mean_ctrls[last + 3] = hover_f32;
         }
 
-        // -----------------------------------------------------------------
-        // 7. Reset terminated battles and their warm-start slots
-        //    (sequential — resets need the per-battle RNG).
-        // -----------------------------------------------------------------
+        // Reset terminated battles and their warm-start slots (sequential —
+        // resets need the per-battle RNG).
         let mut step_results = Vec::with_capacity(results.len());
         for (i, (result, done)) in results.into_iter().enumerate() {
             if done {
@@ -476,7 +459,6 @@ impl GpuBatchOrchestrator {
                     self.batch_config.wind_theta,
                     &mut self.rngs[i],
                 );
-                // Reset warm-start to hover for both drones in the battle.
                 for d_offset in 0..2 {
                     let base = (2 * i + d_offset) * drone_stride;
                     for slot in 0..horizon {
@@ -492,6 +474,96 @@ impl GpuBatchOrchestrator {
         }
 
         step_results
+    }
+
+    /// Step all battles once: GPU MPPI action selection → parallel physics →
+    /// observations + rewards → per-battle reset on termination.
+    ///
+    /// Returns one `StepResult` per battle.
+    pub fn step_all(&mut self) -> Vec<StepResult> {
+        let n_battles = self.battles.len();
+        let horizon = self.pipeline.horizon;
+        let drone_stride = horizon * 4;
+
+        // Pack states, sample noise, dispatch GPU MPPI.
+        let new_mean = self.pack_and_dispatch_gpu_mppi();
+
+        // Pull motor[0] out of each drone's returned horizon. This is the
+        // action applied at the current control tick.
+        let mut motors_a_vec: Vec<Vector4<f64>> = Vec::with_capacity(n_battles);
+        let mut motors_b_vec: Vec<Vector4<f64>> = Vec::with_capacity(n_battles);
+        for b in 0..n_battles {
+            let base_a = 2 * b * drone_stride;
+            let base_b = (2 * b + 1) * drone_stride;
+            motors_a_vec.push(Vector4::new(
+                new_mean[base_a] as f64,
+                new_mean[base_a + 1] as f64,
+                new_mean[base_a + 2] as f64,
+                new_mean[base_a + 3] as f64,
+            ));
+            motors_b_vec.push(Vector4::new(
+                new_mean[base_b] as f64,
+                new_mean[base_b + 1] as f64,
+                new_mean[base_b + 2] as f64,
+                new_mean[base_b + 3] as f64,
+            ));
+        }
+
+        self.apply_physics_and_warm_start(new_mean, motors_a_vec, motors_b_vec)
+    }
+
+    /// Step all battles using external actions for agent A (learning agent)
+    /// and GPU MPPI for agent B (opponent).
+    ///
+    /// `actions_a` must contain one `[f32; 4]` motor command per battle, in
+    /// the same order as the battles vector. Values are expected in
+    /// `[0, max_thrust]`; the method clamps into that range before stepping
+    /// physics. The full GPU MPPI pipeline still runs (so agent B's plan
+    /// conditions on agent A's true state via the enemy buffer), but the
+    /// resulting action for agent A is discarded in favor of `actions_a[i]`.
+    ///
+    /// Panics if `actions_a.len() != self.n_battles()`.
+    pub fn step_with_agent_a_actions(&mut self, actions_a: &[[f32; 4]]) -> Vec<StepResult> {
+        assert_eq!(
+            actions_a.len(),
+            self.battles.len(),
+            "actions_a len {} != n_battles {}",
+            actions_a.len(),
+            self.battles.len()
+        );
+
+        let n_battles = self.battles.len();
+        let horizon = self.pipeline.horizon;
+        let drone_stride = horizon * 4;
+        let max_thrust = self.params.max_thrust;
+
+        // Pack states, sample noise, dispatch GPU MPPI. Agent A's output
+        // from the GPU is discarded below, but we still dispatch for all
+        // 2N drones so that agent B's rollouts include agent A's true
+        // current state via the enemy buffer.
+        let new_mean = self.pack_and_dispatch_gpu_mppi();
+
+        let mut motors_a_vec: Vec<Vector4<f64>> = Vec::with_capacity(n_battles);
+        let mut motors_b_vec: Vec<Vector4<f64>> = Vec::with_capacity(n_battles);
+        for (b, a) in actions_a.iter().enumerate() {
+            let base_b = (2 * b + 1) * drone_stride;
+            // Agent A: external action, clamped to [0, max_thrust].
+            motors_a_vec.push(Vector4::new(
+                (a[0] as f64).clamp(0.0, max_thrust),
+                (a[1] as f64).clamp(0.0, max_thrust),
+                (a[2] as f64).clamp(0.0, max_thrust),
+                (a[3] as f64).clamp(0.0, max_thrust),
+            ));
+            // Agent B: GPU MPPI output.
+            motors_b_vec.push(Vector4::new(
+                new_mean[base_b] as f64,
+                new_mean[base_b + 1] as f64,
+                new_mean[base_b + 2] as f64,
+                new_mean[base_b + 3] as f64,
+            ));
+        }
+
+        self.apply_physics_and_warm_start(new_mean, motors_a_vec, motors_b_vec)
     }
 }
 
@@ -678,6 +750,95 @@ mod tests {
             assert!(!battle.done);
             assert_eq!(battle.step_count, 0);
         }
+    }
+
+    #[test]
+    fn test_gpu_orchestrator_step_with_agent_a_actions() {
+        if !gpu_available_or_skip("test_gpu_orchestrator_step_with_agent_a_actions") {
+            return;
+        }
+        let mut orch = GpuBatchOrchestrator::new(
+            4,
+            small_batch_config(),
+            RewardConfig::default(),
+            32,
+            5,
+            0.03,
+            13,
+        )
+        .expect("gpu orchestrator builds");
+
+        let hover = orch.params.hover_thrust() as f32;
+        let actions_a: Vec<[f32; 4]> = vec![[hover; 4]; orch.n_battles()];
+
+        for step in 0..10 {
+            let results = orch.step_with_agent_a_actions(&actions_a);
+            assert_eq!(results.len(), 4, "step {step}");
+            for (bi, r) in results.iter().enumerate() {
+                for m in &r.motors_a {
+                    assert!(
+                        m.is_finite(),
+                        "motor A non-finite at step {step}, battle {bi}: {m}"
+                    );
+                    // Agent A's applied motors must equal the hover input
+                    // (up to the f32 -> f64 cast).
+                    assert!(
+                        (*m - hover as f64).abs() < 1e-5,
+                        "motor A not hover at step {step}, battle {bi}: {m}",
+                    );
+                }
+                for m in &r.motors_b {
+                    assert!(
+                        m.is_finite(),
+                        "motor B non-finite at step {step}, battle {bi}: {m}"
+                    );
+                }
+            }
+            for (bi, battle) in orch.battles.iter().enumerate() {
+                let pos_a = &battle.state_a.position;
+                let pos_b = &battle.state_b.position;
+                assert!(
+                    pos_a.x.is_finite() && pos_a.y.is_finite() && pos_a.z.is_finite(),
+                    "NaN in state_a at step {step}, battle {bi}: {pos_a:?}",
+                );
+                assert!(
+                    pos_b.x.is_finite() && pos_b.y.is_finite() && pos_b.z.is_finite(),
+                    "NaN in state_b at step {step}, battle {bi}: {pos_b:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_gpu_orchestrator_panics_on_wrong_actions_a_len() {
+        if !gpu_available_or_skip("test_gpu_orchestrator_panics_on_wrong_actions_a_len") {
+            return;
+        }
+        // Can't wrap the orchestrator construction in catch_unwind safely
+        // (AssertUnwindSafe on a struct holding a wgpu device is dicey), so
+        // build first and then assert that the method call panics.
+        let mut orch = GpuBatchOrchestrator::new(
+            3,
+            small_batch_config(),
+            RewardConfig::default(),
+            32,
+            5,
+            0.03,
+            17,
+        )
+        .expect("gpu orchestrator builds");
+
+        let hover = orch.params.hover_thrust() as f32;
+        // Wrong length: 2 instead of 3.
+        let wrong_actions: Vec<[f32; 4]> = vec![[hover; 4]; 2];
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            orch.step_with_agent_a_actions(&wrong_actions);
+        }));
+        assert!(
+            result.is_err(),
+            "expected panic on wrong actions_a length, but call succeeded",
+        );
     }
 
     #[test]
