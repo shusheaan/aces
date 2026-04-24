@@ -1,13 +1,13 @@
-//! GPU MPPI pipeline skeleton.
+//! GPU MPPI pipeline.
 //!
-//! Builds the wgpu device/queue and allocates all storage + uniform buffers
-//! needed for Phase 2 GPU MPPI trajectory optimization. Static uniforms
-//! (drone params, cost weights + arena bounds, obstacle list) are uploaded at
-//! construction.
+//! Builds the wgpu device/queue, allocates all storage + uniform buffers, and
+//! constructs the bind group layout + compiled shader module + two compute
+//! pipelines (`rollout_and_cost`, `softmax_reduce`) needed for Phase 2 GPU
+//! MPPI trajectory optimization. Static uniforms (drone params, cost weights +
+//! arena bounds, obstacle list) are uploaded at construction.
 //!
-//! This file is a skeleton — no bind group layout, no compute shader, no
-//! dispatch. Those land in a follow-up subtask. Downstream shader integration
-//! will wrap these buffers; public fields are intentional here.
+//! Dispatch (submitting work to the GPU) is not yet wired — that is a
+//! follow-up subtask.
 //!
 //! # Binding layout (per the parallel-simulation plan)
 //!
@@ -15,11 +15,11 @@
 //! |--------:|----------|--------------------------------------|-------------|
 //! | 0       | storage  | states[N_DRONES × 13]                | read        |
 //! | 1       | storage  | enemies[N_DRONES × 13]               | read        |
-//! | 2       | storage  | mean_ctrls[N_DRONES × H × 4]         | read_write  |
+//! | 2       | storage  | mean_ctrls[N_DRONES × H × 4]         | read (write by future warm-start kernel) |
 //! | 3       | storage  | noise[N_DRONES × N × H × 4]          | read        |
 //! | 4       | storage  | costs[N_DRONES × N]                  | read_write  |
 //! | 5       | storage  | ctrls_out[N_DRONES × N × H × 4]      | read_write  |
-//! | 6       | storage  | result[N_DRONES × H × 4]             | write       |
+//! | 6       | storage  | result[N_DRONES × H × 4]             | read_write  |
 //! | 7       | uniform  | DroneParamsGpu                       | read        |
 //! | 8       | uniform  | CostWeightsGpu + arena bounds        | read        |
 //! | 9       | storage  | obstacles[MAX_OBSTACLES]             | read        |

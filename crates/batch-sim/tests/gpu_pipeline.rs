@@ -163,10 +163,14 @@ fn test_pipeline_builds_compute_pipelines() {
 }
 
 #[test]
-fn test_shader_module_usable() {
-    // The shader_module field should be present and thus have successfully
-    // compiled from `full_mppi_source()` on the real device.
-    if !gpu_available_or_skip("test_shader_module_usable") {
+fn test_bind_group_assembles_against_layout() {
+    // Stronger than just field-presence: try to actually build a BindGroup
+    // from the pipeline's layout + its own buffers. This exercises the
+    // consistency between BindGroupLayoutEntry usage flags (Storage vs Uniform)
+    // and the buffer creation flags (STORAGE vs UNIFORM). If any entry in
+    // `bind_group_layout_entries()` disagrees with the buffer's `usage`,
+    // this call panics with a descriptive wgpu validation error.
+    if !gpu_available_or_skip("test_bind_group_assembles_against_layout") {
         return;
     }
     let params = DroneParamsF32::crazyflie();
@@ -176,7 +180,58 @@ fn test_shader_module_usable() {
     let pipeline =
         GpuBatchMppi::new(4, 32, 10, &params, weights, &arena).expect("pipeline construction");
 
-    let _module: &wgpu::ShaderModule = &pipeline.shader_module;
+    let _bind_group = pipeline
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mppi.test_bind_group"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: pipeline.states_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: pipeline.enemies_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: pipeline.mean_ctrls_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: pipeline.noise_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: pipeline.costs_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: pipeline.ctrls_out_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: pipeline.result_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: pipeline.params_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: pipeline.weights_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: pipeline.obstacles_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: pipeline.dims_uniform.as_entire_binding(),
+                },
+            ],
+        });
 }
 
 #[test]
