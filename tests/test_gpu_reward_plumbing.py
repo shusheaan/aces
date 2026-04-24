@@ -11,15 +11,12 @@ from __future__ import annotations
 import pytest
 
 
-def test_reward_config_constants_match_rules_toml(core_available: bool) -> None:
+def test_reward_config_constants_match_rules_toml() -> None:
     """``rules.toml`` section ``[reward]`` exposes the keys the wrapper expects.
 
     Doesn't require a GPU — pure Python config parse. Guards against the
     rules.toml schema drifting away from what the GPU wrapper reads.
     """
-    if not core_available:
-        pytest.skip("aces._core needed for config load")
-
     import dataclasses
 
     from aces.config import load_configs
@@ -38,6 +35,9 @@ def test_reward_config_constants_match_rules_toml(core_available: bool) -> None:
     ]
     for key in required:
         assert key in rcfg, f"rules.toml [reward] missing '{key}'"
+
+    # opponent_crash_reward lives in [task_reward_overrides.*], not root [reward]
+    assert "opponent_crash_reward" not in rcfg
 
 
 def test_gpu_vec_env_accepts_custom_reward(gpu_available: bool) -> None:
@@ -83,11 +83,8 @@ def test_gpu_vec_env_default_reads_rules_toml(gpu_available: bool) -> None:
         env.close()
 
 
-def test_load_reward_from_rules_has_all_keys(core_available: bool) -> None:
+def test_load_reward_from_rules_has_all_keys() -> None:
     """``_load_reward_from_rules`` returns all 8 keys the Rust side requires."""
-    if not core_available:
-        pytest.skip("aces._core needed for config load")
-
     from aces.training.gpu_vec_env import _load_reward_from_rules
 
     d = _load_reward_from_rules()
