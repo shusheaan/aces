@@ -311,7 +311,9 @@ class DroneDogfightEnv(gym.Env):
         """
         state_b = list(self._sim.drone_b_state())
         state_a = list(self._sim.drone_a_state())
-        return self._build_obs(state_b, state_a, 0.0, 0.0, 0.0)
+        # Combined arena SDF at opponent position (matches batch-sim slot [15]).
+        opp_sdf = float(self._sim.arena_sdf(list(state_b[:3])))
+        return self._build_obs(state_b, state_a, opp_sdf, 0.0, 0.0)
 
     def set_next_opponent_action(self, raw_action: list[float]) -> None:
         """Pre-set opponent's raw [-1,1] action for the next step.
@@ -465,16 +467,18 @@ class DroneDogfightEnv(gym.Env):
         elif self._opponent_mode == "policy" and self._opponent_policy is not None:
             state_b = list(self._sim.drone_b_state())
             state_a = list(self._sim.drone_a_state())
+            # Combined arena SDF at opponent position (matches batch-sim).
+            opp_sdf = float(self._sim.arena_sdf(list(state_b[:3])))
             if self._fpv:
                 opp_obs = self._build_fpv_obs(
                     state_b,
-                    nearest_obs_dist=0.0,
+                    nearest_obs_dist=opp_sdf,
                     lock_progress=0.0,
                     being_locked_progress=0.0,
                     depth_image=None,
                 )
             else:
-                opp_obs = self._build_obs(state_b, state_a, 0.0, 0.0, 0.0)
+                opp_obs = self._build_obs(state_b, state_a, opp_sdf, 0.0, 0.0)
             raw, _ = self._opponent_policy.predict(opp_obs, deterministic=True)
             return self._map_action(np.array(raw, dtype=np.float32))
         else:
@@ -652,11 +656,13 @@ class DroneDogfightEnv(gym.Env):
 
         # At reset drones start at hover with identity rotation
         initial_euler = (0.0, 0.0, 0.0)
+        # Combined SDF at spawn (matches batch-sim observation slot [15]).
+        initial_sdf = float(self._sim.arena_sdf(list(state_a[:3])))
 
         if self._fpv:
             obs = self._build_fpv_obs(
                 state_a,
-                nearest_obs_dist=10.0,
+                nearest_obs_dist=initial_sdf,
                 lock_progress=0.0,
                 being_locked_progress=0.0,
                 depth_image=None,
@@ -673,7 +679,7 @@ class DroneDogfightEnv(gym.Env):
             obs = self._build_obs(  # type: ignore[assignment]
                 state_a,
                 zero_opp,
-                nearest_obs_dist=10.0,
+                nearest_obs_dist=initial_sdf,
                 lock_progress=0.0,
                 being_locked_progress=0.0,
                 opponent_visible=initial_visible,

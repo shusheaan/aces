@@ -680,8 +680,13 @@ impl Simulation {
             kill_a,
             kill_b,
             distance: self.drone_a.distance_to(&self.drone_b),
-            nearest_obs_dist_a: self.arena.obstacle_sdf(&self.drone_a.position),
-            nearest_obs_dist_b: self.arena.obstacle_sdf(&self.drone_b.position),
+            // Combined SDF (boundary + obstacle), matching
+            // crates/batch-sim/src/observation.rs::build_observation which uses
+            // arena.sdf(). Previously used obstacle_sdf only, which returned
+            // +infinity for empty arenas and produced divergent observations
+            // between CPU env and batch-sim (obs slot [15]).
+            nearest_obs_dist_a: self.arena.sdf(&self.drone_a.position),
+            nearest_obs_dist_b: self.arena.sdf(&self.drone_b.position),
             noisy_b_pos_from_a: [noisy_b.x, noisy_b.y, noisy_b.z],
             noisy_a_pos_from_b: [noisy_a.x, noisy_a.y, noisy_a.z],
             wind_force_a: [wf_a.x, wf_a.y, wf_a.z],
