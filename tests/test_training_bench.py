@@ -14,16 +14,6 @@ def test_script_exists():
     assert SCRIPT.exists()
 
 
-@pytest.fixture
-def core_available() -> bool:
-    try:
-        import aces._core  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
 def test_script_imports_and_runs_help(core_available):
     # Runs `--help` which doesn't need GPU
     result = subprocess.run(

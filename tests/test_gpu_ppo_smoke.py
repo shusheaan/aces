@@ -18,23 +18,6 @@ def test_smoke_script_exists():
     assert SMOKE_SCRIPT.exists(), f"missing {SMOKE_SCRIPT}"
 
 
-@pytest.fixture(scope="module")
-def gpu_available() -> bool:
-    """Check if aces._core.GpuVecEnv + GPU adapter both available."""
-    try:
-        from aces._core import GpuVecEnv  # noqa: F401
-    except ImportError:
-        return False
-    try:
-        from aces.training.gpu_vec_env import GpuVecEnv
-
-        env = GpuVecEnv(n_envs=1, mppi_samples=8, mppi_horizon=4)
-        env.close()
-        return True
-    except Exception:
-        return False
-
-
 def test_ppo_smoke_runs(gpu_available):
     if not gpu_available:
         pytest.skip("GpuVecEnv/GPU not available")

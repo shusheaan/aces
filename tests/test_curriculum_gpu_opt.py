@@ -10,30 +10,6 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture(scope="module")
-def core_available() -> bool:
-    try:
-        import aces._core  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-@pytest.fixture(scope="module")
-def gpu_available() -> bool:
-    try:
-        from aces.training.gpu_vec_env import GpuVecEnv
-    except (ImportError, RuntimeError):
-        return False
-    try:
-        env = GpuVecEnv(n_envs=1, mppi_samples=8, mppi_horizon=4)
-        env.close()
-        return True
-    except Exception:
-        return False
-
-
 def _minimal_stages() -> list[dict]:
     """Tiny two-stage curriculum for construction-only smoke tests."""
     return [
