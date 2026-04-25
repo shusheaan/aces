@@ -1,3 +1,9 @@
+# Keep this file at the repository root because the Docker build context for
+# these images is the repo root, for example:
+#   docker buildx build -f docker/Dockerfile.dev-base ... .
+# If we later want per-Dockerfile ignore rules next to the Dockerfiles, use
+# files such as docker/Dockerfile.dev-base.dockerignore.
+
 # Build artifacts
 target/
 *.so
