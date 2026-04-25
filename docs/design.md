@@ -260,7 +260,12 @@ crates/ (Rust, via PyO3)             aces/ (Python package)
 aces/
 ├── Cargo.toml                      # Workspace root (5 crates)
 ├── pyproject.toml                  # Python: maturin + poetry
-├── Dockerfile                      # Multi-stage headless training image
+├── docker/                         # Container definitions and startup helpers
+│   ├── Dockerfile.train            # Multi-stage headless training image
+│   ├── Dockerfile.dev-base         # Runpod/cloud development base image
+│   ├── Dockerfile.aces             # ACES cloud workspace image
+│   ├── runpod-start.sh             # Pod bootstrap: clone/sync/bootstrap repo
+│   └── apply-dotfiles.sh           # Dotfiles installer for cloud home dirs
 ├── CLAUDE.md                       # Dev conventions
 │
 ├── crates/                          # ── Rust workspace (5 crates) ──

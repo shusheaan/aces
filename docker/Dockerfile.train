@@ -6,7 +6,7 @@
 # Does NOT build the Bevy game crate (not needed for training).
 #
 # ── Build ─────────────────────────────────────────────────────────
-#   docker build -t aces-train .
+#   docker build -f docker/Dockerfile.train -t aces-train .
 #
 # ── Train (single stage) ─────────────────────────────────────────
 #   docker run --rm \

@@ -1,34 +1,32 @@
 # Runpod GPU Development Setup
 
-This repo now includes two Dockerfiles under `docker/` so you can separate the
-cloud development environment from the ACES project image:
+All Dockerfiles now live under `docker/`:
 
 - `docker/Dockerfile.dev-base`
   - Runpod-compatible base image for cloud development.
   - Installs Rust, Poetry, Maturin, Vulkan userspace libraries, `tmux`, `zsh`,
-    `ripgrep`, Node `25.9.0`, npm `11.13.0`, and `Claude Code`.
+    `ripgrep`, Node `25.9.0`, npm `11.13.0`, `openssh-client`, and `Claude Code`.
 - `docker/Dockerfile.aces`
-  - Extends the dev base image.
-  - Installs ACES Python dependencies.
-  - Builds the GPU-enabled Rust extension with `maturin develop --features gpu`.
-  - Bakes the current repo snapshot into `/opt/aces/image-src`.
+  - Thin ACES workspace image on top of the dev base.
+  - Does not bake the repo into the image.
+  - Defaults to the startup-script flow: clone ACES into `/workspace/aces`,
+    then bootstrap dependencies inside the Pod.
+- `docker/Dockerfile.train`
+  - Standalone CPU training image for headless local or batch runs.
 
-## Why two Dockerfiles
+## Why this layout
 
-Keep the layers separate:
+The cloud-dev case and the training-image case are different:
 
-- Personal environment changes belong in `Dockerfile.dev-base`.
-  - Shell, dotfiles, `Claude Code`, git tools, editors, language runtimes.
-- Project-specific dependencies belong in `Dockerfile.aces`.
-  - ACES source, Poetry dependencies, Rust extension build, test helpers.
-
-That gives you two deployment patterns:
-
-- Reusable dev image:
-  - Start a Pod, clone any repo you want, and work normally.
-- Project image:
-  - Start a Pod with ACES already baked in and ready to bootstrap into
-    `/workspace/aces`.
+- `Dockerfile.dev-base` is your reusable workstation environment.
+  - Shell, dotfiles, git/ssh tools, editors, language runtimes, Claude Code.
+- `Dockerfile.aces` is the ACES-flavored workstation image.
+  - It keeps the environment opinionated for this repo, but still clones the
+    repo at Pod startup so the cloud machine can `pull`, create branches, and
+    `push` like a normal remote dev box.
+- `Dockerfile.train` is for packaging a reproducible runtime image.
+  - It bakes code into the image on purpose because it targets batch training,
+    not interactive cloud development.
 
 ## Base image and toolchain versions
 
@@ -66,7 +64,7 @@ docker buildx build \
   --push .
 ```
 
-Then build the ACES project image on top of it:
+Then build the ACES workspace image on top of it:
 
 ```bash
 docker buildx build \
@@ -75,6 +73,12 @@ docker buildx build \
   --build-arg DEV_BASE_IMAGE=YOUR_REGISTRY/aces-dev-base:latest \
   -t YOUR_REGISTRY/aces-runpod:latest \
   --push .
+```
+
+Use the headless training image for local or batch jobs:
+
+```bash
+docker build -f docker/Dockerfile.train -t aces-train .
 ```
 
 `linux/amd64` is important for Runpod GPU Pods.
@@ -99,7 +103,7 @@ docker buildx build \
 2. Apply dotfiles at Pod startup:
 
 - Set `ACES_DOTFILES_REPO` to a git URL, or
-- Mount/clone your dotfiles into a directory and set `ACES_DOTFILES_DIR`.
+- Mount or clone your dotfiles into a directory and set `ACES_DOTFILES_DIR`.
 
 The helper script `docker/apply-dotfiles.sh` copies common top-level shell/git
 files and merges `.config/` plus `.local/bin/` into the container home.
@@ -108,21 +112,25 @@ files and merges `.config/` plus `.local/bin/` into the container home.
 
 The image entrypoint is `docker/runpod-start.sh`. On Pod boot it can:
 
-- Persist Claude config and shell history into `/workspace/.dev-home`.
+- Persist Claude config, git config, SSH config or keys, and shell history into
+  `/workspace/.dev-home`.
 - Clone your dotfiles repo if `ACES_DOTFILES_REPO` is set.
 - Clone the project repo if `ACES_REPO_URL` is set.
-- Or copy the baked image snapshot from `/opt/aces/image-src` into
-  `/workspace/aces` if `ACES_BOOTSTRAP_FROM_IMAGE=1`.
-- Optionally run `poetry install` and rebuild the GPU extension if
-  `ACES_BOOTSTRAP_PROJECT=1`.
+- Checkout a requested branch or ref if `ACES_REPO_REF` is set.
+- Optionally run a safe startup `git pull --ff-only` if `ACES_GIT_AUTO_PULL=1`.
+- Run `poetry install` and rebuild the GPU extension if
+  `ACES_BOOTSTRAP_PROJECT=1`. The bootstrap marker is tied to the current git
+  commit, so a newly pulled commit will trigger a rebuild automatically.
 
 Useful environment variables:
 
 - `ACES_PROJECT_DIR=/workspace/aces`
 - `ACES_REPO_URL=https://github.com/YOU/aces.git`
 - `ACES_REPO_REF=main`
-- `ACES_BOOTSTRAP_FROM_IMAGE=1`
+- `ACES_REPO_REMOTE=origin`
+- `ACES_GIT_AUTO_PULL=1`
 - `ACES_BOOTSTRAP_PROJECT=1`
+- `ACES_FORCE_BOOTSTRAP=1`
 - `ACES_RUN_GPU_CHECK=1`
 - `ACES_DOTFILES_REPO=https://github.com/YOU/gral-dotfiles.git`
 - `ACES_DOTFILES_REF=main`
@@ -130,9 +138,9 @@ Useful environment variables:
 
 ## Recommended Runpod flow
 
-### Option A: use the ACES image directly
+### Option A: use the ACES workspace image and clone on boot
 
-Use this when you want the fastest first boot for this repo.
+Use this when you want the cloud Pod to behave like a normal remote dev box.
 
 1. Build and push `YOUR_REGISTRY/aces-runpod:latest`.
 2. In Runpod, create a custom Pod template with:
@@ -140,16 +148,18 @@ Use this when you want the fastest first boot for this repo.
    - Volume mount path: `/workspace`
    - Ports: `22/tcp`, `8888/http`
 3. Set environment variables:
-   - `ACES_BOOTSTRAP_FROM_IMAGE=1`
+   - `ACES_REPO_URL=https://github.com/YOU/aces.git`
+   - `ACES_REPO_REF=main`
    - `ACES_PROJECT_DIR=/workspace/aces`
+   - `ACES_BOOTSTRAP_PROJECT=1`
+   - `ACES_GIT_AUTO_PULL=1`
 4. Start the Pod.
 5. Open the terminal or SSH in.
 6. `cd /workspace/aces`
 7. `claude`
 
-If you want a fresh rebuild on first boot, also set:
+If you want GPU validation during startup, also set:
 
-- `ACES_BOOTSTRAP_PROJECT=1`
 - `ACES_RUN_GPU_CHECK=1`
 
 ### Option B: use the dev-base image and clone manually
@@ -194,6 +204,8 @@ poetry run python scripts/train_server.py --n-envs 8 --device cuda
 - The dev base image installs `libvulkan1` and `vulkan-tools` for that reason.
 - `Claude Code` state is persisted under `/workspace/.dev-home`, so restarting
   the Pod does not wipe your login and history.
+- Git state under `~/.gitconfig`, `~/.git-credentials`, and `~/.ssh` is also
+  persisted there, which is what makes remote `pull` and `push` practical.
 - If you update the repo significantly, rerun:
 
 ```bash
