@@ -98,6 +98,8 @@ ACES_REPO_REF=main
 ACES_PROJECT_DIR=/workspace/aces
 ACES_BOOTSTRAP_PROJECT=1
 ACES_GIT_AUTO_PULL=1
+POETRY_VIRTUALENVS_CREATE=true
+POETRY_VIRTUALENVS_IN_PROJECT=true
 ```
 
 Optional values:
@@ -115,6 +117,8 @@ Notes:
 
 - `ACES_BOOTSTRAP_PROJECT=1`
   - Runs `poetry install --with dev` and `poetry run maturin develop --release --features gpu`.
+- `POETRY_VIRTUALENVS_CREATE=true` and `POETRY_VIRTUALENVS_IN_PROJECT=true`
+  - Keeps Poetry inside `/workspace/aces/.venv` instead of modifying the Runpod base image's system Python.
 - `ACES_GIT_AUTO_PULL=1`
   - Runs `git pull --ff-only` on startup when the worktree is clean.
   - If the Pod already has local changes, startup skips the pull on purpose.
@@ -188,6 +192,10 @@ into `/workspace/.dev-home`, so they survive Pod restarts when `/workspace` is p
   - For ACES development, use `aces-runpod`.
 - The first boot is slower than later boots.
   - Dependency install and `maturin develop` happen there.
+- If startup fails while uninstalling a package such as `pyparsing`, Poetry is
+  trying to modify system Python. Set `POETRY_VIRTUALENVS_CREATE=true` and
+  `POETRY_VIRTUALENVS_IN_PROJECT=true`, then restart with
+  `ACES_FORCE_BOOTSTRAP=1`.
 - Updating Pod environment variables causes a Pod restart.
   - Only data under `/workspace` is preserved.
 - `ACES_GIT_AUTO_PULL=1` is intentionally conservative.

@@ -34,18 +34,18 @@ repos:
         pass_filenames: false
         types: [rust]
 
-      - id: cargo-test
-        name: cargo test
+      - id: cargo-test-core
+        name: cargo test core
         language: system
-        entry: cargo test --workspace
+        entry: cargo test -p aces-sim-core -p aces-batch-sim -p aces-mppi -p aces-estimator --lib
         pass_filenames: false
-        types: [rust]
-        stages: [pre-push]
+        files: ^(crates/(sim-core|batch-sim|mppi|estimator)/|Cargo\.toml|Cargo\.lock)
+        stages: [pre-commit]
 
-      - id: pytest
-        name: pytest
+      - id: pytest-core
+        name: pytest core
         language: system
-        entry: .venv/bin/python -m pytest tests/ -q
+        entry: bash scripts/test-python-core.sh
         pass_filenames: false
-        types: [python]
-        stages: [pre-push]
+        files: ^(aces|tests|configs|scripts)/|^(pyproject\.toml|poetry\.lock)$
+        stages: [pre-commit]

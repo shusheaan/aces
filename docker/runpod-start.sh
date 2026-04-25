@@ -190,6 +190,13 @@ bootstrap_project_env() {
     log "installing Python dependencies"
     (
         cd "${PROJECT_DIR}"
+        export POETRY_VIRTUALENVS_CREATE="${POETRY_VIRTUALENVS_CREATE:-true}"
+        export POETRY_VIRTUALENVS_IN_PROJECT="${POETRY_VIRTUALENVS_IN_PROJECT:-true}"
+        if command -v python3.12 >/dev/null 2>&1; then
+            poetry env use python3.12
+        else
+            poetry env use python3
+        fi
         poetry install --with dev --no-interaction --no-ansi
         log "building GPU-enabled Rust extension"
         poetry run maturin develop --release --features gpu

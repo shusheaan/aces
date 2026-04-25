@@ -132,6 +132,8 @@ Useful environment variables:
 - `ACES_BOOTSTRAP_PROJECT=1`
 - `ACES_FORCE_BOOTSTRAP=1`
 - `ACES_RUN_GPU_CHECK=1`
+- `POETRY_VIRTUALENVS_CREATE=true`
+- `POETRY_VIRTUALENVS_IN_PROJECT=true`
 - `ACES_DOTFILES_REPO=https://github.com/YOU/gral-dotfiles.git`
 - `ACES_DOTFILES_REF=main`
 - `ACES_DOTFILES_DIR=/workspace/dotfiles`
@@ -153,6 +155,8 @@ Use this when you want the cloud Pod to behave like a normal remote dev box.
    - `ACES_PROJECT_DIR=/workspace/aces`
    - `ACES_BOOTSTRAP_PROJECT=1`
    - `ACES_GIT_AUTO_PULL=1`
+   - `POETRY_VIRTUALENVS_CREATE=true`
+   - `POETRY_VIRTUALENVS_IN_PROJECT=true`
 4. Start the Pod.
 5. Open the terminal or SSH in.
 6. `cd /workspace/aces`
@@ -212,3 +216,9 @@ poetry run python scripts/train_server.py --n-envs 8 --device cuda
 poetry install --with dev
 poetry run maturin develop --release --features gpu
 ```
+
+- If bootstrapping fails while uninstalling a system package such as
+  `pyparsing`, Poetry is modifying the Runpod base image's system Python. Keep
+  the project isolated by setting `POETRY_VIRTUALENVS_CREATE=true` and
+  `POETRY_VIRTUALENVS_IN_PROJECT=true`, then restart with
+  `ACES_FORCE_BOOTSTRAP=1`.

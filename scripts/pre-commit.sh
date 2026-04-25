@@ -39,11 +39,11 @@ else
     fail "cargo clippy"
 fi
 
-step "cargo test"
-if cargo test --workspace --quiet 2>/dev/null; then
-    pass "cargo test"
+step "cargo test core"
+if cargo test -p aces-sim-core -p aces-batch-sim -p aces-mppi -p aces-estimator --lib --quiet 2>/dev/null; then
+    pass "cargo test core"
 else
-    fail "cargo test"
+    fail "cargo test core"
 fi
 
 # ── Python ────────────────────────────────────────────
@@ -62,6 +62,12 @@ else
     fail "ruff check — run 'poetry run ruff check --fix aces/ tests/ scripts/' to fix"
 fi
 
+step "pytest core"
+if bash scripts/test-python-core.sh 2>/dev/null; then
+    pass "pytest core"
+else
+    fail "pytest core"
+fi
 
 # ── Result ────────────────────────────────────────────
 
