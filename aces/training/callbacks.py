@@ -13,6 +13,24 @@ from stable_baselines3.common.callbacks import BaseCallback
 logger = logging.getLogger("aces.trainer")
 
 
+def _find_opponent_env(env):
+    """Walk the VecEnv wrapper chain looking for set_opponent_policy/set_opponent_weights.
+
+    VecNormalize does not forward arbitrary attributes, so a direct
+    ``hasattr(env, "set_opponent_policy")`` check fails when the
+    BatchedOpponentVecEnv is wrapped by VecNormalize. This helper
+    traverses the ``.venv`` chain until it finds the attribute or
+    exhausts the chain.
+
+    Returns the innermost env that has ``set_opponent_policy``, or
+    ``None`` if none is found.
+    """
+    cur = env
+    while hasattr(cur, "venv") and not hasattr(cur, "set_opponent_policy"):
+        cur = cur.venv
+    return cur if hasattr(cur, "set_opponent_policy") else None
+
+
 # ---------------------------------------------------------------------------
 # Callbacks
 # ---------------------------------------------------------------------------
@@ -68,24 +86,24 @@ class VecOpponentUpdateCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         self._last_update_window = self.num_timesteps // self.update_interval
-        # If wrapped with BatchedOpponentVecEnv, initialize opponent policy
-        env = self.training_env
-        if hasattr(env, "set_opponent_policy") and not env.has_opponent:  # type: ignore[attr-defined]
+        # Walk the wrapper chain — VecNormalize hides arbitrary attributes
+        opponent_env = _find_opponent_env(self.training_env)
+        if opponent_env is not None and not opponent_env.has_opponent:  # type: ignore[attr-defined]
             # Clone the current policy for the opponent
             opponent = copy.deepcopy(self.model.policy)
             opponent.set_training_mode(False)
-            env.set_opponent_policy(opponent)
+            opponent_env.set_opponent_policy(opponent)
 
     def _on_step(self) -> bool:
         window = self.num_timesteps // self.update_interval
         if window > self._last_update_window:
             self._last_update_window = window
             state_dict = copy.deepcopy(self.model.policy.state_dict())
-            env = self.training_env
-            if hasattr(env, "set_opponent_weights"):
-                env.set_opponent_weights(state_dict)
+            opponent_env = _find_opponent_env(self.training_env)
+            if opponent_env is not None:
+                opponent_env.set_opponent_weights(state_dict)
             else:
-                env.env_method("set_opponent_weights", state_dict)
+                self.training_env.env_method("set_opponent_weights", state_dict)
             self.update_count += 1
             if self.verbose:
                 logger.info(
@@ -110,15 +128,15 @@ class PoolOpponentCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         self._last_sample_window = self.num_timesteps // self._sample_interval
-        # Initialize batched opponent if wrapper is present
-        env = self.training_env
+        # Walk the wrapper chain — VecNormalize hides arbitrary attributes
+        opponent_env = _find_opponent_env(self.training_env)
         if (
-            hasattr(env, "set_opponent_policy")
-            and not env.has_opponent  # type: ignore[attr-defined]
+            opponent_env is not None
+            and not opponent_env.has_opponent  # type: ignore[attr-defined]
             and self._pool.size > 0
         ):
             policy, _ = self._pool.sample()
-            env.set_opponent_policy(policy)
+            opponent_env.set_opponent_policy(policy)
 
     def _on_step(self) -> bool:
         window = self.num_timesteps // self._sample_interval
@@ -126,11 +144,11 @@ class PoolOpponentCallback(BaseCallback):
             self._last_sample_window = window
             policy, meta = self._pool.sample()
             state_dict = copy.deepcopy(policy.state_dict())
-            env = self.training_env
-            if hasattr(env, "set_opponent_weights"):
-                env.set_opponent_weights(state_dict)
+            opponent_env = _find_opponent_env(self.training_env)
+            if opponent_env is not None:
+                opponent_env.set_opponent_weights(state_dict)
             else:
-                env.env_method("set_opponent_weights", state_dict)
+                self.training_env.env_method("set_opponent_weights", state_dict)
             if self.verbose:
                 logger.info("Pool sampled opponent: %s", meta)
         return True

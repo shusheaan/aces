@@ -12,8 +12,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-# Regex for "metric>threshold" conditions (e.g. "win_rate>0.3")
-_CONDITION_RE = re.compile(r"^(\w+)>([\d.]+)$")
+# Regex for "metric>threshold" conditions (e.g. "win_rate>0.3" or "win_rate > 0.3")
+_CONDITION_RE = re.compile(r"^(\w+)\s*>\s*(\d+(?:\.\d+)?)$")
 
 
 @dataclass
@@ -113,9 +113,10 @@ class CurriculumManager:
         phase = self.current_phase()
         condition = phase.promote_condition
 
-        # "steps" — always True (caller is responsible for timestep limits)
+        # "steps" — always False; model.learn(timesteps) runs to completion
+        # naturally. The PromotionCheckCallback must NOT set stop_training.
         if condition == "steps":
-            return True
+            return False
 
         # "metric>threshold" format
         match = _CONDITION_RE.match(condition)

@@ -248,12 +248,18 @@ class CurriculumTrainer:
                     phase_or_task.opponent,
                 )
 
+            phase_task = (
+                getattr(phase_or_task, "task", None)
+                if hasattr(phase_or_task, "task")
+                else None
+            )
             raw_env = _GpuVecEnv(
                 n_envs=self._n_envs,
                 mppi_samples=self._gpu_mppi_samples,
                 mppi_horizon=self._gpu_mppi_horizon,
                 noise_std=self._gpu_noise_std,
                 seed=self._seed if self._seed is not None else 0,
+                task=phase_task,
             )
             return VecNormalize(
                 raw_env, norm_obs=True, norm_reward=False, clip_obs=10.0
@@ -336,7 +342,8 @@ class CurriculumTrainer:
             tb_log_dir = None
 
         start_idx = self.curriculum.phase_index
-        vec_normalize_path = log_dir / "vec_normalize.pkl"
+        # Per-phase VecNormalize save paths (phase name is used as key)
+        vec_normalize_dir = log_dir / "vec_normalize"
 
         for i in range(start_idx, len(self._phases)):
             self.curriculum.phase_index = i
@@ -361,18 +368,33 @@ class CurriculumTrainer:
                     clip_obs=10.0,
                 )
 
-            # Restore VecNormalize stats from previous phase
-            if i > start_idx and vec_normalize_path.exists():
+            # Restore VecNormalize stats from previous phase using the official API
+            if i > start_idx:
                 from stable_baselines3.common.vec_env import VecNormalize
 
-                if isinstance(env, VecNormalize):
-                    import pickle
+                prev_phase = self._phases[i - 1]
+                prev_vn_path = vec_normalize_dir / f"{prev_phase.name}_vecnormalize.pkl"
+                if isinstance(env, VecNormalize) and prev_vn_path.exists():
+                    loaded_vn = VecNormalize.load(str(prev_vn_path), env.venv)
+                    env.obs_rms = loaded_vn.obs_rms
+                    env.ret_rms = loaded_vn.ret_rms
+                    # Warn if norm_reward semantics differ between phases
+                    if loaded_vn.norm_reward != env.norm_reward:
+                        logger.warning(
+                            "Phase %d norm_reward=%s differs from previous phase "
+                            "norm_reward=%s; resetting ret_rms to avoid silent breakage",
+                            i,
+                            env.norm_reward,
+                            loaded_vn.norm_reward,
+                        )
+                        from stable_baselines3.common.running_mean_std import (
+                            RunningMeanStd,
+                        )
 
-                    with open(vec_normalize_path, "rb") as f:
-                        saved = pickle.load(f)
-                    env.obs_rms = saved["obs_rms"]
-                    env.ret_rms = saved["ret_rms"]
-                    logger.info("Restored VecNormalize stats from previous phase")
+                        env.ret_rms = RunningMeanStd(shape=())
+                    logger.info(
+                        "Restored VecNormalize stats from phase '%s'", prev_phase.name
+                    )
 
             if self.model is None:
                 policy_name, policy_kwargs = self._resolve_policy()
@@ -444,13 +466,11 @@ class CurriculumTrainer:
 
             self.stage_stats.append(stats_cb.summary())
 
-            # Save VecNormalize stats for next phase
+            # Save VecNormalize stats for next phase using the official API
             if isinstance(env, VecNormalize):
-                import pickle
-
-                vec_normalize_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(vec_normalize_path, "wb") as f:
-                    pickle.dump({"obs_rms": env.obs_rms, "ret_rms": env.ret_rms}, f)
+                vn_path = vec_normalize_dir / f"{phase.name}_vecnormalize.pkl"
+                vn_path.parent.mkdir(parents=True, exist_ok=True)
+                env.save(str(vn_path))
 
             if self._save_dir:
                 self._save_dir.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,7 @@
 """Tests for aces.curriculum — TOML-driven curriculum manager."""
 
+import pytest
+
 from aces.curriculum import CurriculumManager, Phase, load_curriculum
 
 
@@ -65,13 +67,15 @@ def test_curriculum_promote() -> None:
 
 
 def test_curriculum_promote_steps_condition() -> None:
-    """'steps' condition always returns True."""
+    """'steps' condition always returns False (model.learn runs to completion)."""
     phases = [
         Phase(name="step_phase", promote_condition="steps"),
         Phase(name="next"),
     ]
     mgr = CurriculumManager(phases)
-    assert mgr.should_promote({"episodes": 0}) is True
+    # Even with plenty of episodes and a high win_rate, "steps" never promotes
+    assert mgr.should_promote({"episodes": 0}) is False
+    assert mgr.should_promote({"episodes": 1000, "win_rate": 0.99}) is False
 
 
 def test_curriculum_promote_reward_condition() -> None:
@@ -126,3 +130,38 @@ def test_curriculum_state_dict() -> None:
     mgr2.load_state_dict(state)
     assert mgr2.phase_index == 2
     assert mgr2.current_phase().name == mgr.current_phase().name
+
+
+# ---------------------------------------------------------------------------
+# Bug #28 — promote-condition regex whitespace tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_promote_condition_whitespace_accepted() -> None:
+    """'win_rate > 0.30' (with spaces) should parse and promote correctly."""
+    phases = [
+        Phase(
+            name="ws_phase",
+            promote_condition="win_rate > 0.30",
+            promote_window=10,
+        ),
+        Phase(name="next"),
+    ]
+    mgr = CurriculumManager(phases)
+    assert mgr.should_promote({"episodes": 10, "win_rate": 0.50}) is True
+    assert mgr.should_promote({"episodes": 10, "win_rate": 0.10}) is False
+
+
+def test_promote_condition_double_gt_rejected() -> None:
+    """'win_rate >> 0.30' (double >) should raise ValueError."""
+    phases = [
+        Phase(
+            name="bad_phase",
+            promote_condition="win_rate >> 0.30",
+            promote_window=10,
+        ),
+        Phase(name="next"),
+    ]
+    mgr = CurriculumManager(phases)
+    with pytest.raises(ValueError, match="Unknown promote_condition"):
+        mgr.should_promote({"episodes": 100, "win_rate": 0.99})

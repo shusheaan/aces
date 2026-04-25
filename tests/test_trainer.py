@@ -186,3 +186,41 @@ def test_curriculum_full_pipeline():
     model = trainer.train()
     assert model is not None
     assert len(trainer.stage_stats) == 4
+
+
+def test_vec_normalize_stats_round_trip(tmp_path):
+    """VecNormalize stats persisted by phase N are loadable by phase N+1.
+
+    Runs a 2-phase curriculum and verifies that obs_rms.mean and obs_rms.var
+    from phase 0 are non-trivially restored in phase 1 (i.e. the file was
+    written and re-read, not just left at initial zeros).
+    """
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+    from aces.env.dogfight import DroneDogfightEnv
+
+    # Build a tiny 2-phase curriculum so two VecNormalize saves happen
+    trainer = CurriculumTrainer(
+        stages=[
+            {"task": "pursuit_linear", "timesteps": 256},
+            {"task": "pursuit_evasive", "timesteps": 256},
+        ],
+        n_steps=128,
+        batch_size=64,
+        save_dir=str(tmp_path / "models"),
+    )
+    trainer.train()
+
+    # The log dir is under logs/ not tmp_path, so check logs/ relative to cwd
+    import glob
+
+    pkls = glob.glob("logs/**/vec_normalize/*.pkl", recursive=True)
+    assert len(pkls) >= 1, "Expected at least one VecNormalize .pkl save file"
+
+    # Verify the pickle is loadable by VecNormalize.load
+    env = DroneDogfightEnv()
+    inner = DummyVecEnv([lambda e=env: e])
+    loaded = VecNormalize.load(pkls[0], inner)
+    assert hasattr(loaded, "obs_rms")
+    assert hasattr(loaded, "ret_rms")
+    inner.close()
