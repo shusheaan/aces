@@ -89,6 +89,42 @@ def _load_wind_from_rules() -> dict:
     }
 
 
+def _load_mppi_weights_from_rules() -> dict:
+    """Read MPPI cost weights from ``configs/rules.toml`` section ``[mppi.weights]``.
+
+    Returns a dict with the five cost-weight floats the Rust GPU orchestrator
+    consumes: ``w_dist``, ``w_face``, ``w_ctrl``, ``w_obs``, ``d_safe``.
+    """
+    from aces.config import load_configs
+
+    cfg = load_configs()
+    w = cfg.rules.mppi.weights
+    return {
+        "w_dist": float(w.w_dist),
+        "w_face": float(w.w_face),
+        "w_ctrl": float(w.w_ctrl),
+        "w_obs": float(w.w_obs),
+        "d_safe": float(w.d_safe),
+    }
+
+
+def _load_lockon_from_rules() -> dict:
+    """Read lock-on parameters from ``configs/rules.toml`` section ``[lockon]``.
+
+    Returns a dict with the three lock-on floats the Rust GPU orchestrator
+    consumes: ``fov_degrees``, ``lock_distance``, ``lock_duration``.
+    """
+    from aces.config import load_configs
+
+    cfg = load_configs()
+    lo = cfg.rules.lockon
+    return {
+        "fov_degrees": float(lo.fov_degrees),
+        "lock_distance": float(lo.lock_distance),
+        "lock_duration": float(lo.lock_duration),
+    }
+
+
 def _load_reward_from_rules() -> dict:
     """Read the 8 reward weights the Rust orchestrator expects from rules.toml.
 
@@ -140,6 +176,9 @@ class GpuVecEnv(VecEnv):
         wind_theta: float | None = None,
         seed: int = 42,
         reward_config: Optional[dict] = None,
+        task: Optional[str] = None,
+        mppi_weights_config: Optional[dict] = None,
+        lockon_config: Optional[dict] = None,
     ):
         """Create a GPU-backed VecEnv of N parallel MPPI-vs-PPO battles.
 
@@ -156,11 +195,19 @@ class GpuVecEnv(VecEnv):
                 ``kill_reward``, ``killed_penalty``, ``collision_penalty``,
                 ``opponent_crash_reward``, ``lock_progress_reward``,
                 ``approach_reward``, ``survival_bonus``, ``control_penalty``.
-
-        Note:
-            Per-task reward overrides (``[task_reward_overrides.<task>]`` in
-            rules.toml) are NOT merged here — this slice uses the base
-            ``[reward]`` section only. Per-task plumbing is a follow-up.
+            task: optional task name (e.g. ``"hover"``, ``"dogfight"``). When
+                set and ``[task_reward_overrides.<task>]`` exists in
+                ``rules.toml``, those overrides are merged on top of the base
+                ``[reward]`` section before being passed to the Rust side. This
+                mirrors the CPU env's ``DroneDogfightEnv`` per-task merge.
+            mppi_weights_config: optional override for the 5 MPPI cost weights.
+                When ``None``, reads ``configs/rules.toml`` section
+                ``[mppi.weights]``. Keys: ``w_dist``, ``w_face``, ``w_ctrl``,
+                ``w_obs``, ``d_safe``.
+            lockon_config: optional override for the 3 lock-on parameters.
+                When ``None``, reads ``configs/rules.toml`` section
+                ``[lockon]``. Keys: ``fov_degrees``, ``lock_distance``,
+                ``lock_duration``.
         """
         if not _GPU_AVAILABLE:
             raise RuntimeError(
@@ -173,6 +220,15 @@ class GpuVecEnv(VecEnv):
 
         if reward_config is None:
             reward_config = _load_reward_from_rules()
+        # Bug #24: merge per-task reward overrides the same way the CPU env does.
+        if task is not None:
+            from aces.config import load_configs
+
+            cfg = load_configs()
+            for key, val in cfg.rules.task_reward_overrides.get(task, {}).items():
+                if key in reward_config:
+                    reward_config = dict(reward_config)  # make a copy before mutating
+                    reward_config[key] = float(val)
 
         if wind_sigma is None or wind_theta is None:
             wind_defaults = _load_wind_from_rules()
@@ -180,6 +236,14 @@ class GpuVecEnv(VecEnv):
                 wind_sigma = wind_defaults["wind_sigma"]
             if wind_theta is None:
                 wind_theta = wind_defaults["wind_theta"]
+
+        # Bug #18: load MPPI cost weights from rules.toml when not overridden.
+        if mppi_weights_config is None:
+            mppi_weights_config = _load_mppi_weights_from_rules()
+
+        # Bug #13: load lock-on params from rules.toml when not overridden.
+        if lockon_config is None:
+            lockon_config = _load_lockon_from_rules()
 
         self._rust = _RustGpuVecEnv(
             n_envs=n_envs,
@@ -193,6 +257,8 @@ class GpuVecEnv(VecEnv):
             wind_theta=wind_theta,
             seed=seed,
             **reward_config,
+            **mppi_weights_config,
+            **lockon_config,
         )
 
         self._last_actions: Optional[np.ndarray] = None

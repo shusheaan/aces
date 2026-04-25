@@ -12,8 +12,9 @@ use aces_batch_sim::f32_dynamics::DroneParamsF32;
 use aces_batch_sim::f32_sdf::{ArenaF32, ObstacleF32};
 use aces_batch_sim::gpu::adapter::probe_gpu;
 use aces_batch_sim::gpu::pipeline::{
-    compute_batch_actions_cpu_reference, CostWeightsGpu, DroneParamsGpu, GpuBatchMppi,
-    GpuInitError, MppiDims, ObstacleGpu, MAX_OBSTACLES,
+    compute_batch_actions_cpu_reference, compute_batch_actions_cpu_reference_with_intermediates,
+    CostWeightsGpu, DroneParamsGpu, GpuBatchMppi, GpuInitError, MppiDims, ObstacleGpu,
+    MAX_OBSTACLES,
 };
 use nalgebra::Vector3;
 
@@ -578,6 +579,144 @@ fn test_gpu_matches_cpu_reference_parity() {
     );
 
     eprintln!("[parity] max abs diff = {max_diff:.6e}");
+}
+
+/// Extends `test_gpu_matches_cpu_reference_parity` by reading back the
+/// per-sample intermediate buffers (costs and ctrls_out) from the GPU and
+/// comparing them element-wise against the CPU reference.
+///
+/// This catches divergences that cancel in softmax — e.g. an off-by-one in
+/// the noise index where two samples swap perturbations and produce the same
+/// final weighted-mean action despite different intermediate traces.
+#[test]
+fn test_gpu_per_sample_parity() {
+    if !gpu_available_or_skip("test_gpu_per_sample_parity") {
+        return;
+    }
+
+    let n_drones: usize = 4;
+    let n_samples: usize = 32;
+    let horizon: usize = 10;
+
+    let params_f32 = DroneParamsF32::crazyflie();
+    let arena_f32 = warehouse_arena_f32();
+
+    let gpu_weights = default_weights();
+    let cost_weights = CostWeightsF32 {
+        w_dist: gpu_weights.w_dist,
+        w_face: gpu_weights.w_face,
+        w_ctrl: gpu_weights.w_ctrl,
+        w_obs: gpu_weights.w_obs,
+        d_safe: gpu_weights.d_safe,
+    };
+    let hover_for_cost = gpu_weights.hover;
+
+    use rand::rngs::SmallRng;
+    use rand::Rng;
+    use rand::SeedableRng;
+    let mut rng = SmallRng::seed_from_u64(77);
+
+    let mut states = vec![0.0f32; n_drones * 13];
+    for d in 0..n_drones {
+        let base = d * 13;
+        states[base] = rng.gen_range(2.0f32..8.0);
+        states[base + 1] = rng.gen_range(2.0f32..8.0);
+        states[base + 2] = rng.gen_range(1.0f32..2.5);
+        states[base + 9] = 1.0;
+    }
+    let mut enemies = vec![0.0f32; n_drones * 13];
+    for d in 0..n_drones {
+        let base = d * 13;
+        let eb = (d ^ 1) * 13;
+        enemies[base..base + 13].copy_from_slice(&states[eb..eb + 13]);
+    }
+
+    let hover_ctrl = params_f32.hover_thrust();
+    let mean_ctrls = vec![hover_ctrl; n_drones * horizon * 4];
+
+    let noise_std = 0.01f32;
+    let noise_len = n_drones * n_samples * horizon * 4;
+    let mut noise = Vec::with_capacity(noise_len);
+    use rand_distr::{Distribution, Normal};
+    let normal = Normal::new(0.0f32, noise_std).unwrap();
+    for _ in 0..noise_len {
+        noise.push(normal.sample(&mut rng));
+    }
+
+    let pipeline = GpuBatchMppi::new(
+        n_drones,
+        n_samples,
+        horizon,
+        &params_f32,
+        gpu_weights,
+        &arena_f32,
+    )
+    .expect("pipeline construction");
+
+    let dims = MppiDims::new(
+        n_drones as u32,
+        n_samples as u32,
+        horizon as u32,
+        10,
+        arena_f32.obstacles.len() as u32,
+        0.001,
+    );
+
+    let (gpu_result, gpu_costs, gpu_ctrls): (Vec<f32>, Vec<f32>, Vec<f32>) =
+        pipeline.compute_batch_actions_with_intermediates(&states, &enemies, &mean_ctrls, &noise);
+    let (cpu_result, cpu_costs, cpu_ctrls): (Vec<f32>, Vec<f32>, Vec<f32>) =
+        compute_batch_actions_cpu_reference_with_intermediates(
+            &params_f32,
+            &arena_f32,
+            &cost_weights,
+            hover_for_cost,
+            dims,
+            &states,
+            &enemies,
+            &mean_ctrls,
+            &noise,
+        );
+
+    // Final reduced actions must agree (same tolerance as existing parity test).
+    let final_max_diff: f32 = gpu_result
+        .iter()
+        .zip(cpu_result.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        final_max_diff < 1e-2,
+        "per-sample test: final action parity failed max_diff={final_max_diff:.6e}"
+    );
+
+    // Per-sample costs: tolerance is permissive (costs can be large floats).
+    assert_eq!(gpu_costs.len(), cpu_costs.len(), "costs length mismatch");
+    let cost_max_diff: f32 = gpu_costs
+        .iter()
+        .zip(cpu_costs.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("[per-sample] cost max abs diff = {cost_max_diff:.6e}");
+    assert!(
+        cost_max_diff < 1.0,
+        "GPU-CPU per-sample cost parity failed: max abs diff = {cost_max_diff:.6e}"
+    );
+
+    // Per-sample controls: motors are bounded [0, 0.15] so tight tolerance applies.
+    assert_eq!(
+        gpu_ctrls.len(),
+        cpu_ctrls.len(),
+        "ctrls_out length mismatch"
+    );
+    let ctrl_max_diff: f32 = gpu_ctrls
+        .iter()
+        .zip(cpu_ctrls.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("[per-sample] ctrls_out max abs diff = {ctrl_max_diff:.6e}");
+    assert!(
+        ctrl_max_diff < 1e-3,
+        "GPU-CPU per-sample ctrls_out parity failed: max abs diff = {ctrl_max_diff:.6e}"
+    );
 }
 
 #[test]

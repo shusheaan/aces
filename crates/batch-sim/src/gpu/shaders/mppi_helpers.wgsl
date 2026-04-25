@@ -43,7 +43,11 @@ struct DroneParams {
 }
 
 // 48 bytes. Layout matches `CostWeightsGpu` in pipeline.rs.
-//   6 scalars (24B) + 8B pad + vec3 arena_bounds (12B) + 4B tail pad.
+//   6 scalars (24B) + fov_half (4B) + 1 pad (4B) + vec3 arena_bounds (12B) + 4B tail pad.
+//
+// `fov_half` is the half-angle of the lock-on cone in radians, read from
+// `configs/rules.toml [lockon] fov_degrees / 2`. Previously hardcoded as
+// PI/4 (45 deg) in `evasion_cost_gpu`; now plumbed via this uniform.
 struct CostWeights {
     w_dist: f32,
     w_face: f32,
@@ -51,7 +55,7 @@ struct CostWeights {
     w_obs: f32,
     d_safe: f32,
     hover: f32,
-    _pad0: f32,
+    fov_half: f32,
     _pad1: f32,
     arena_bounds: vec3<f32>,
     _pad_tail: f32,

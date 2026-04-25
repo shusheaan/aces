@@ -133,10 +133,9 @@ fn pursuit_cost_gpu(
     let ctrl_diff = ctrl - vec4<f32>(hover_thrust);
     cost = cost + weights.w_ctrl * dot(ctrl_diff, ctrl_diff);
 
-    // Obstacle.
-    if (sdf_val <= 0.0) {
-        cost = cost + 1.0e6;
-    } else if (sdf_val < weights.d_safe) {
+    // Obstacle soft margin (no hard collision penalty here — handled by
+    // max_penetration tracking across substeps in rollout_and_cost).
+    if (sdf_val < weights.d_safe) {
         let margin = weights.d_safe - sdf_val;
         cost = cost + weights.w_obs * margin * margin;
     }
@@ -175,7 +174,7 @@ fn evasion_cost_gpu(
         let cos_e = clamp(dot(enemy_forward, to_self) / dist_es, -1.0, 1.0);
         angle_from_enemy = acos(cos_e);
     }
-    let fov_half: f32 = 0.7853981633974483; // PI / 4
+    let fov_half: f32 = weights.fov_half; // from [lockon] fov_degrees/2, uniform
     if (angle_from_enemy < fov_half) {
         cost = cost + weights.w_face * (1.0 - angle_from_enemy / fov_half);
     }
@@ -184,10 +183,9 @@ fn evasion_cost_gpu(
     let ctrl_diff = ctrl - vec4<f32>(hover_thrust);
     cost = cost + weights.w_ctrl * dot(ctrl_diff, ctrl_diff);
 
-    // Obstacle.
-    if (sdf_val <= 0.0) {
-        cost = cost + 1.0e6;
-    } else if (sdf_val < weights.d_safe) {
+    // Obstacle soft margin (no hard collision penalty here — handled by
+    // max_penetration tracking across substeps in rollout_and_cost).
+    if (sdf_val < weights.d_safe) {
         let margin = weights.d_safe - sdf_val;
         cost = cost + weights.w_obs * margin * margin;
     }
@@ -217,10 +215,11 @@ fn rollout_and_cost(@builtin(workgroup_id) wid: vec3<u32>) {
     state.velocity = vec3<f32>(
         states[state_base + 3u], states[state_base + 4u], states[state_base + 5u],
     );
-    state.attitude = vec4<f32>(
+    let attitude_raw = vec4<f32>(
         states[state_base + 6u], states[state_base + 7u],
         states[state_base + 8u], states[state_base + 9u],
     );
+    state.attitude = quat_normalize(attitude_raw);
     state.angular_velocity = vec3<f32>(
         states[state_base + 10u], states[state_base + 11u], states[state_base + 12u],
     );
@@ -232,10 +231,11 @@ fn rollout_and_cost(@builtin(workgroup_id) wid: vec3<u32>) {
     enemy.velocity = vec3<f32>(
         enemies[state_base + 3u], enemies[state_base + 4u], enemies[state_base + 5u],
     );
-    enemy.attitude = vec4<f32>(
+    let enemy_attitude_raw = vec4<f32>(
         enemies[state_base + 6u], enemies[state_base + 7u],
         enemies[state_base + 8u], enemies[state_base + 9u],
     );
+    enemy.attitude = quat_normalize(enemy_attitude_raw);
     enemy.angular_velocity = vec3<f32>(
         enemies[state_base + 10u], enemies[state_base + 11u], enemies[state_base + 12u],
     );
@@ -250,6 +250,9 @@ fn rollout_and_cost(@builtin(workgroup_id) wid: vec3<u32>) {
 
     let hover = weights.hover;
     var total_cost: f32 = 0.0;
+    // Track max penetration depth across ALL substeps of the full rollout.
+    // Mirrors the CPU MPPI `max_penetration` in optimizer.rs:222-260.
+    var max_penetration: f32 = 0.0;
 
     // Strides for the per-timestep control buffers.
     let mean_drone_stride = dims.horizon * 4u;
@@ -281,8 +284,11 @@ fn rollout_and_cost(@builtin(workgroup_id) wid: vec3<u32>) {
         ctrls_out[out_base + 3u] = u.w;
 
         // RK4 sub-stepping: substeps × dt_sim = dt_ctrl. Wind is constant.
+        // After each substep, check penetration depth and update max.
         for (var s: u32 = 0u; s < dims.substeps; s = s + 1u) {
             state = rk4_step(state, u, params, dims.dt_sim, wind);
+            let pen = -arena_sdf_from_storage(state.position);
+            max_penetration = max(max_penetration, pen);
         }
 
         // Stage cost. Even drone_idx → pursuit; odd → evasion.
@@ -292,6 +298,12 @@ fn rollout_and_cost(@builtin(workgroup_id) wid: vec3<u32>) {
         } else {
             total_cost = total_cost + evasion_cost_gpu(state, enemy, u, hover, sdf_val);
         }
+    }
+
+    // Hard collision penalty: applies once if any substep penetrated an obstacle.
+    // Matches CPU MPPI optimizer.rs: `if max_penetration > 0.0 { total_cost += 1e8; }`.
+    if (max_penetration > 0.0) {
+        total_cost = total_cost + 1.0e8;
     }
 
     costs[drone_idx * dims.n_samples + sample_idx] = total_cost;

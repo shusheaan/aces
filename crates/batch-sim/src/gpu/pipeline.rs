@@ -89,9 +89,15 @@ impl DroneParamsGpu {
 /// MPPI cost weights and arena bounds, GPU-compatible layout.
 ///
 /// Combined into one uniform block to match binding 8 in the plan layout.
-/// Exactly 48 bytes. Six scalars (24 bytes) + 8-byte pad so the following
-/// `vec3<f32>` arena_bounds lands on a 16-byte boundary, then arena_bounds
-/// (12 bytes) + trailing pad (4 bytes). All padding is explicit for `Pod`.
+/// Exactly 48 bytes:
+///   - 6 scalars: `w_dist`, `w_face`, `w_ctrl`, `w_obs`, `d_safe`, `hover` (24 B)
+///   - `fov_half` — half lock-on cone angle (radians), sourced from
+///     `[lockon] fov_degrees / 2` in `rules.toml` (4 B)
+///   - `_pad_before_bounds` — 1 × f32 pad so `arena_bounds` lands on a
+///     16-byte boundary (4 B)
+///   - `arena_bounds: [f32; 3]` (12 B)
+///   - `_pad_tail: f32` (4 B)
+/// Total: 48 B.  All padding is explicit so `bytemuck::Pod` accepts the type.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CostWeightsGpu {
@@ -101,7 +107,11 @@ pub struct CostWeightsGpu {
     pub w_obs: f32,
     pub d_safe: f32,
     pub hover: f32,
-    pub _pad_before_bounds: [f32; 2],
+    /// Half-angle of the lock-on cone in radians.  Plumbed from
+    /// `[lockon] fov_degrees / 2` in `rules.toml`.  Replaces the previously
+    /// hardcoded `PI / 4` literal in `evasion_cost_gpu` (WGSL).
+    pub fov_half: f32,
+    pub _pad_before_bounds: f32,
     pub arena_bounds: [f32; 3],
     pub _pad_tail: f32,
 }
@@ -116,6 +126,29 @@ impl CostWeightsGpu {
         hover: f32,
         arena_bounds: [f32; 3],
     ) -> Self {
+        // Default fov_half = PI/4 (45°), matching [lockon] fov_degrees = 90.
+        Self::with_fov_half(
+            w_dist,
+            w_face,
+            w_ctrl,
+            w_obs,
+            d_safe,
+            hover,
+            arena_bounds,
+            std::f32::consts::FRAC_PI_4,
+        )
+    }
+
+    pub fn with_fov_half(
+        w_dist: f32,
+        w_face: f32,
+        w_ctrl: f32,
+        w_obs: f32,
+        d_safe: f32,
+        hover: f32,
+        arena_bounds: [f32; 3],
+        fov_half: f32,
+    ) -> Self {
         Self {
             w_dist,
             w_face,
@@ -123,7 +156,8 @@ impl CostWeightsGpu {
             w_obs,
             d_safe,
             hover,
-            _pad_before_bounds: [0.0; 2],
+            fov_half,
+            _pad_before_bounds: 0.0,
             arena_bounds,
             _pad_tail: 0.0,
         }
@@ -866,6 +900,223 @@ impl GpuBatchMppi {
 
         result
     }
+
+    /// Debug variant of [`compute_batch_actions`] that additionally reads back
+    /// the per-sample intermediate buffers (binding 4 = costs, binding 5 =
+    /// ctrls_out).  Returns `(result, costs_readback, ctrls_out_readback)`.
+    ///
+    /// Intended for parity tests and debugging only — it allocates extra
+    /// staging buffers and performs two additional GPU→CPU copies per call.
+    ///
+    /// Layout of returned vecs (same as the GPU buffers):
+    /// - `result`: `[n_drones * horizon * 4]` — weighted-mean control sequence.
+    /// - `costs_readback`: `[n_drones * n_samples]` — total rollout cost per
+    ///   (drone, sample).  Flat index: `d * n_samples + s`.
+    /// - `ctrls_out_readback`: `[n_drones * n_samples * horizon * 4]` — perturbed
+    ///   clamped controls.  Flat index: `((d * n_samples + s) * horizon + h) * 4 + m`.
+    pub fn compute_batch_actions_with_intermediates(
+        &self,
+        states: &[f32],
+        enemies: &[f32],
+        mean_ctrls: &[f32],
+        noise: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        // Upload inputs — identical to compute_batch_actions.
+        let expected_states = self.n_drones * STATE_DIM;
+        let expected_enemies = self.n_drones * STATE_DIM;
+        let expected_mean_ctrls = self.n_drones * self.horizon * 4;
+        let expected_noise = self.n_drones * self.n_samples * self.horizon * 4;
+        let expected_result = self.n_drones * self.horizon * 4;
+        let expected_costs = self.n_drones * self.n_samples;
+        let expected_ctrls_out = self.n_drones * self.n_samples * self.horizon * 4;
+
+        assert_eq!(states.len(), expected_states);
+        assert_eq!(enemies.len(), expected_enemies);
+        assert_eq!(mean_ctrls.len(), expected_mean_ctrls);
+        assert_eq!(noise.len(), expected_noise);
+
+        self.queue
+            .write_buffer(&self.states_buffer, 0, bytemuck::cast_slice(states));
+        self.queue
+            .write_buffer(&self.enemies_buffer, 0, bytemuck::cast_slice(enemies));
+        self.queue
+            .write_buffer(&self.mean_ctrls_buffer, 0, bytemuck::cast_slice(mean_ctrls));
+        self.queue
+            .write_buffer(&self.noise_buffer, 0, bytemuck::cast_slice(noise));
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mppi.debug.bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.states_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.enemies_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.mean_ctrls_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.noise_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.costs_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.ctrls_out_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.result_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.params_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.weights_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: self.obstacles_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: self.dims_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: self.wind_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let result_size_bytes = (expected_result * std::mem::size_of::<f32>()) as u64;
+        let costs_size_bytes = (expected_costs * std::mem::size_of::<f32>()) as u64;
+        let ctrls_size_bytes = (expected_ctrls_out * std::mem::size_of::<f32>()) as u64;
+
+        let staging_result = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mppi.debug.staging_result"),
+            size: result_size_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let staging_costs = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mppi.debug.staging_costs"),
+            size: costs_size_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let staging_ctrls = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mppi.debug.staging_ctrls"),
+            size: ctrls_size_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mppi.debug.encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mppi.debug.rollout"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.rollout_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(self.n_samples as u32, self.n_drones as u32, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("mppi.debug.softmax"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.softmax_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(self.n_drones as u32, 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(
+            &self.result_buffer,
+            0,
+            &staging_result,
+            0,
+            result_size_bytes,
+        );
+        encoder.copy_buffer_to_buffer(&self.costs_buffer, 0, &staging_costs, 0, costs_size_bytes);
+        encoder.copy_buffer_to_buffer(
+            &self.ctrls_out_buffer,
+            0,
+            &staging_ctrls,
+            0,
+            ctrls_size_bytes,
+        );
+
+        self.queue.submit(Some(encoder.finish()));
+
+        // Map all three staging buffers.
+        let (tx_r, rx_r) = std::sync::mpsc::channel();
+        let (tx_c, rx_c) = std::sync::mpsc::channel();
+        let (tx_k, rx_k) = std::sync::mpsc::channel();
+        staging_result
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx_r.send(r);
+            });
+        staging_costs
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx_c.send(r);
+            });
+        staging_ctrls
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx_k.send(r);
+            });
+
+        self.device.poll(wgpu::Maintain::Wait);
+
+        rx_r.recv()
+            .unwrap()
+            .expect("staging_result map_async failed");
+        rx_c.recv()
+            .unwrap()
+            .expect("staging_costs map_async failed");
+        rx_k.recv()
+            .unwrap()
+            .expect("staging_ctrls map_async failed");
+
+        let result: Vec<f32> = {
+            let data = staging_result.slice(..).get_mapped_range();
+            bytemuck::cast_slice::<u8, f32>(&data).to_vec()
+        };
+        staging_result.unmap();
+
+        let costs_rb: Vec<f32> = {
+            let data = staging_costs.slice(..).get_mapped_range();
+            bytemuck::cast_slice::<u8, f32>(&data).to_vec()
+        };
+        staging_costs.unmap();
+
+        let ctrls_rb: Vec<f32> = {
+            let data = staging_ctrls.slice(..).get_mapped_range();
+            bytemuck::cast_slice::<u8, f32>(&data).to_vec()
+        };
+        staging_ctrls.unmap();
+
+        (result, costs_rb, ctrls_rb)
+    }
 }
 
 /// Pure-CPU f32 reference implementation of the two GPU kernels
@@ -1034,6 +1285,151 @@ pub fn compute_batch_actions_cpu_reference(
     }
 
     result
+}
+
+/// Debug variant of [`compute_batch_actions_cpu_reference`] that additionally
+/// returns the per-sample intermediate buffers so they can be compared against
+/// GPU readbacks from [`GpuBatchMppi::compute_batch_actions_with_intermediates`].
+///
+/// Returns `(result, costs, ctrls_out)` where:
+/// - `costs[d * n_samples + s]` — total rollout cost for drone `d`, sample `s`.
+/// - `ctrls_out[((d * n_samples + s) * horizon + h) * 4 + m]` — perturbed
+///   clamped motor value.
+///
+/// Intended for parity tests and debugging; prefer
+/// [`compute_batch_actions_cpu_reference`] for benchmarking.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn compute_batch_actions_cpu_reference_with_intermediates(
+    params: &DroneParamsF32,
+    arena: &ArenaF32,
+    weights_cost: &CostWeightsF32,
+    hover_thrust: f32,
+    dims: MppiDims,
+    states: &[f32],
+    enemies: &[f32],
+    mean_ctrls: &[f32],
+    noise: &[f32],
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let n_drones = dims.n_drones as usize;
+    let n_samples = dims.n_samples as usize;
+    let horizon = dims.horizon as usize;
+    let substeps = dims.substeps as usize;
+    let dt_sim = dims.dt_sim;
+    let temperature = dims.temperature;
+
+    assert_eq!(states.len(), n_drones * STATE_DIM);
+    assert_eq!(enemies.len(), n_drones * STATE_DIM);
+    assert_eq!(mean_ctrls.len(), n_drones * horizon * 4);
+    assert_eq!(noise.len(), n_drones * n_samples * horizon * 4);
+
+    let unpack = |buf: &[f32], d: usize| -> DroneStateF32 {
+        let base = d * STATE_DIM;
+        DroneStateF32 {
+            position: Vector3::new(buf[base], buf[base + 1], buf[base + 2]),
+            velocity: Vector3::new(buf[base + 3], buf[base + 4], buf[base + 5]),
+            attitude: UnitQuaternion::from_quaternion(Quaternion::new(
+                buf[base + 9],
+                buf[base + 6],
+                buf[base + 7],
+                buf[base + 8],
+            )),
+            angular_velocity: Vector3::new(buf[base + 10], buf[base + 11], buf[base + 12]),
+        }
+    };
+
+    let mut result = vec![0.0f32; n_drones * horizon * 4];
+    let mut all_costs = vec![0.0f32; n_drones * n_samples];
+    let mut all_ctrls_out = vec![0.0f32; n_drones * n_samples * horizon * 4];
+    let wind = Vector3::<f32>::zeros();
+
+    for d in 0..n_drones {
+        let state0 = unpack(states, d);
+        let enemy = unpack(enemies, d);
+        let is_pursuit = d % 2 == 0;
+
+        let mean_drone_stride = horizon * 4;
+        let noise_drone_stride = n_samples * horizon * 4;
+        let sample_stride = horizon * 4;
+
+        let mut costs = vec![0.0f32; n_samples];
+        let mut sim_ctrls = vec![0.0f32; n_samples * horizon * 4];
+
+        for s in 0..n_samples {
+            let mut state_sim = state0.clone();
+            let mut total_cost = 0.0f32;
+
+            for h in 0..horizon {
+                let mean_base = d * mean_drone_stride + h * 4;
+                let noise_base = d * noise_drone_stride + s * sample_stride + h * 4;
+
+                let u_raw = Vector4::new(
+                    mean_ctrls[mean_base] + noise[noise_base],
+                    mean_ctrls[mean_base + 1] + noise[noise_base + 1],
+                    mean_ctrls[mean_base + 2] + noise[noise_base + 2],
+                    mean_ctrls[mean_base + 3] + noise[noise_base + 3],
+                );
+                let u = Vector4::new(
+                    u_raw[0].clamp(0.0, params.max_thrust),
+                    u_raw[1].clamp(0.0, params.max_thrust),
+                    u_raw[2].clamp(0.0, params.max_thrust),
+                    u_raw[3].clamp(0.0, params.max_thrust),
+                );
+
+                let out_base = s * sample_stride + h * 4;
+                sim_ctrls[out_base] = u[0];
+                sim_ctrls[out_base + 1] = u[1];
+                sim_ctrls[out_base + 2] = u[2];
+                sim_ctrls[out_base + 3] = u[3];
+
+                for _ in 0..substeps {
+                    state_sim = step_rk4_f32(&state_sim, &u, params, dt_sim, &wind);
+                }
+
+                let stage_cost = if is_pursuit {
+                    pursuit_cost_f32(&state_sim, &enemy, &u, hover_thrust, arena, weights_cost)
+                } else {
+                    evasion_cost_f32(&state_sim, &enemy, &u, hover_thrust, arena, weights_cost)
+                };
+                total_cost += stage_cost;
+            }
+
+            costs[s] = total_cost;
+        }
+
+        // Copy per-drone intermediates into global arrays.
+        for s in 0..n_samples {
+            all_costs[d * n_samples + s] = costs[s];
+            for h in 0..horizon {
+                for m in 0..4 {
+                    let src = s * sample_stride + h * 4 + m;
+                    let dst = ((d * n_samples + s) * horizon + h) * 4 + m;
+                    all_ctrls_out[dst] = sim_ctrls[src];
+                }
+            }
+        }
+
+        // Softmax.
+        let min_cost = costs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let total_w: f32 = costs
+            .iter()
+            .map(|c| (-(c - min_cost) / temperature).exp())
+            .sum();
+        let inv_total = if total_w > 0.0 { 1.0 / total_w } else { 0.0 };
+
+        let result_drone_stride = horizon * 4;
+        for h in 0..horizon {
+            for m in 0..4 {
+                let mut acc = 0.0f32;
+                for s in 0..n_samples {
+                    let w = (-(costs[s] - min_cost) / temperature).exp() * inv_total;
+                    acc += sim_ctrls[s * sample_stride + h * 4 + m] * w;
+                }
+                result[d * result_drone_stride + h * 4 + m] = acc;
+            }
+        }
+    }
+
+    (result, all_costs, all_ctrls_out)
 }
 
 #[cfg(test)]

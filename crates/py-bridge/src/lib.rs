@@ -838,6 +838,7 @@ impl MppiController {
         cc_delta = None,
         cc_lambda_lr = 0.1,
         cc_lambda_init = 100.0,
+        seed = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -868,6 +869,7 @@ impl MppiController {
         cc_delta: Option<f64>,
         cc_lambda_lr: f64,
         cc_lambda_init: f64,
+        seed: Option<u64>,
     ) -> Self {
         let arena = build_arena(bounds, obstacles, drone_radius);
         let params = build_params(
@@ -885,17 +887,32 @@ impl MppiController {
             w_obs,
             d_safe,
         };
-        let mut optimizer = MppiOptimizer::new(
-            num_samples,
-            horizon,
-            noise_std,
-            temperature,
-            params,
-            arena,
-            weights,
-            dt_ctrl,
-            substeps,
-        );
+        let mut optimizer = if let Some(s) = seed {
+            MppiOptimizer::with_seed(
+                num_samples,
+                horizon,
+                noise_std,
+                temperature,
+                params,
+                arena,
+                weights,
+                dt_ctrl,
+                substeps,
+                s,
+            )
+        } else {
+            MppiOptimizer::new(
+                num_samples,
+                horizon,
+                noise_std,
+                temperature,
+                params,
+                arena,
+                weights,
+                dt_ctrl,
+                substeps,
+            )
+        };
 
         // Enable risk-aware mode if wind_sigma > 0
         if risk_wind_sigma > 0.0 {
@@ -970,6 +987,7 @@ mod gpu_binding {
     use aces_batch_sim::gpu::orchestrator::GpuBatchOrchestrator;
     use aces_batch_sim::gpu::pipeline::{CostWeightsGpu, GpuBatchMppi};
     use aces_batch_sim::reward::RewardConfig;
+    use aces_sim_core::lockon::LockOnParams;
     use nalgebra::Vector3;
     use numpy::{
         IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2,
@@ -1027,6 +1045,10 @@ mod gpu_binding {
             d.set_item("collision_a", r.info.collision_a)?;
             d.set_item("collision_b", r.info.collision_b)?;
             d.set_item("timeout", r.info.timeout)?;
+            // CPU env compat aliases — see docs/architecture.md §11.25
+            d.set_item("collision", r.info.collision_a)?;
+            d.set_item("truncated", r.info.timeout)?;
+            d.set_item("lock_a_progress", r.info.lock_progress_a)?;
             infos.append(d)?;
         }
 
@@ -1225,6 +1247,18 @@ mod gpu_binding {
             approach_reward = 3.0,
             survival_bonus = 0.01,
             control_penalty = 0.01,
+            // MPPI cost weights (configs/rules.toml [mppi.weights]).
+            // When None, the hardcoded defaults (matching rules.toml) are used.
+            w_dist = None,
+            w_face = None,
+            w_ctrl = None,
+            w_obs = None,
+            d_safe = None,
+            // Lock-on params (configs/rules.toml [lockon]).
+            // When None, crate defaults are used.
+            fov_degrees = None,
+            lock_distance = None,
+            lock_duration = None,
         ))]
         #[allow(clippy::too_many_arguments)]
         fn new(
@@ -1246,6 +1280,14 @@ mod gpu_binding {
             approach_reward: f64,
             survival_bonus: f64,
             control_penalty: f64,
+            w_dist: Option<f32>,
+            w_face: Option<f32>,
+            w_ctrl: Option<f32>,
+            w_obs: Option<f32>,
+            d_safe: Option<f32>,
+            fov_degrees: Option<f32>,
+            lock_distance: Option<f32>,
+            lock_duration: Option<f32>,
         ) -> PyResult<Self> {
             if n_envs == 0 {
                 return Err(PyValueError::new_err("n_envs must be > 0"));
@@ -1267,7 +1309,55 @@ mod gpu_binding {
                 survival_bonus,
                 control_penalty,
             };
-            let inner = GpuBatchOrchestrator::new(
+            // Build cost weights if any scalar override was provided.
+            // We also check `fov_degrees` here: fov_half is stored in
+            // CostWeightsGpu (binding 8) for the WGSL evasion cost, so a
+            // fov_degrees override must update cost weights as well as lockon params.
+            let cost_weights_opt: Option<CostWeightsGpu> = if w_dist.is_some()
+                || w_face.is_some()
+                || w_ctrl.is_some()
+                || w_obs.is_some()
+                || d_safe.is_some()
+                || fov_degrees.is_some()
+            {
+                // Use defaults matching rules.toml for any field left as None.
+                let hover = DroneParamsF32::crazyflie().hover_thrust();
+                // fov_half = fov_degrees / 2 converted to radians;
+                // default PI/4 (45°) matches [lockon] fov_degrees = 90.
+                let fov_half = fov_degrees
+                    .map(|d| (d / 2.0_f32).to_radians())
+                    .unwrap_or(std::f32::consts::FRAC_PI_4);
+                Some(CostWeightsGpu::with_fov_half(
+                    w_dist.unwrap_or(1.0),
+                    w_face.unwrap_or(5.0),
+                    w_ctrl.unwrap_or(0.01),
+                    w_obs.unwrap_or(1000.0),
+                    d_safe.unwrap_or(0.3),
+                    hover,
+                    // arena bounds must match the orchestrator's default warehouse arena.
+                    [10.0_f32, 10.0_f32, 3.0_f32],
+                    fov_half,
+                ))
+            } else {
+                None
+            };
+            // Build LockOnParams if any override was provided.
+            // `fov_degrees` is the full cone angle; `LockOnParams::fov` stores
+            // the full cone angle in radians (same convention as rules.toml).
+            let lockon_opt: Option<LockOnParams> =
+                if fov_degrees.is_some() || lock_distance.is_some() || lock_duration.is_some() {
+                    let def = LockOnParams::default();
+                    Some(LockOnParams {
+                        fov: fov_degrees
+                            .map(|d| (d as f64).to_radians())
+                            .unwrap_or(def.fov),
+                        lock_distance: lock_distance.map(|v| v as f64).unwrap_or(def.lock_distance),
+                        lock_duration: lock_duration.map(|v| v as f64).unwrap_or(def.lock_duration),
+                    })
+                } else {
+                    None
+                };
+            let inner = GpuBatchOrchestrator::new_with_weights(
                 n_envs,
                 batch_config,
                 reward_config,
@@ -1275,6 +1365,8 @@ mod gpu_binding {
                 mppi_horizon,
                 noise_std,
                 seed,
+                cost_weights_opt,
+                lockon_opt,
             )
             .map_err(|e| PyRuntimeError::new_err(format!("GpuVecEnv init failed: {e}")))?;
             Ok(PyGpuVecEnv { inner, n_envs })

@@ -13,7 +13,7 @@
 use crate::battle::{BatchConfig, BattleInfo, BattleState, SpawnMode, StepResult};
 use crate::f32_dynamics::DroneParamsF32;
 use crate::f32_sdf::ArenaF32;
-use crate::gpu::pipeline::{CostWeightsGpu, GpuBatchMppi, GpuInitError};
+use crate::gpu::pipeline::{CostWeightsGpu, GpuBatchMppi, GpuInitError, MppiDims};
 use crate::observation::build_observation;
 use crate::reward::{self, RewardConfig};
 use aces_sim_core::dynamics::DroneParams;
@@ -117,26 +117,67 @@ impl GpuBatchOrchestrator {
         noise_std: f32,
         seed: u64,
     ) -> Result<Self, GpuInitError> {
+        Self::new_with_weights(
+            n_battles,
+            batch_config,
+            reward_config,
+            mppi_samples,
+            mppi_horizon,
+            noise_std,
+            seed,
+            None,
+            None,
+        )
+    }
+
+    /// Like [`Self::new`] but accepts optional cost weight overrides.
+    ///
+    /// When `cost_weights` is `None` the hardcoded defaults that match
+    /// `configs/rules.toml [mppi.weights]` are used. When provided, those
+    /// values override the defaults so Python callers can plumb `[mppi.weights]`
+    /// from `rules.toml` through without touching the WGSL shaders.
+    ///
+    /// `lockon` accepts an optional `LockOnParams` override; when `None` the
+    /// crate default is used.
+    pub fn new_with_weights(
+        n_battles: usize,
+        batch_config: BatchConfig,
+        reward_config: RewardConfig,
+        mppi_samples: usize,
+        mppi_horizon: usize,
+        noise_std: f32,
+        seed: u64,
+        cost_weights: Option<CostWeightsGpu>,
+        lockon: Option<LockOnParams>,
+    ) -> Result<Self, GpuInitError> {
         let params = DroneParams::crazyflie();
         let arena = default_warehouse_arena();
         let params_f32 = DroneParamsF32::crazyflie();
         let arena_f32 = ArenaF32::from_f64(&arena);
-        let lockon_params = LockOnParams::default();
+        let lockon_params = lockon.unwrap_or_default();
 
-        let weights_gpu = CostWeightsGpu::new(
-            1.0,
-            5.0,
-            0.01,
-            1000.0,
-            0.3,
-            params.hover_thrust() as f32,
-            [
-                arena.bounds.x as f32,
-                arena.bounds.y as f32,
-                arena.bounds.z as f32,
-            ],
-        );
+        // fov_half (half-cone angle for evasion cost) is sourced from lockon_params
+        // so that [lockon] fov_degrees in rules.toml flows into the WGSL evasion cost.
+        // lockon.fov is the full cone angle in radians; divide by 2 for half-angle.
+        let fov_half_default = (lockon_params.fov / 2.0) as f32;
+        let weights_gpu = cost_weights.unwrap_or_else(|| {
+            CostWeightsGpu::with_fov_half(
+                1.0,
+                5.0,
+                0.01,
+                1000.0,
+                0.3,
+                params.hover_thrust() as f32,
+                [
+                    arena.bounds.x as f32,
+                    arena.bounds.y as f32,
+                    arena.bounds.z as f32,
+                ],
+                fov_half_default,
+            )
+        });
 
+        let n_obstacles = arena_f32.obstacles.len();
         let pipeline = GpuBatchMppi::new(
             2 * n_battles,
             mppi_samples,
@@ -145,6 +186,17 @@ impl GpuBatchOrchestrator {
             weights_gpu,
             &arena_f32,
         )?;
+
+        // Override the default MppiDims with values derived from BatchConfig so
+        // that `substeps` and `dt_sim` actually match the CPU physics tick.
+        pipeline.update_dims(MppiDims::new(
+            (2 * n_battles) as u32,
+            mppi_samples as u32,
+            mppi_horizon as u32,
+            batch_config.substeps as u32,
+            n_obstacles as u32,
+            (batch_config.dt_ctrl / batch_config.substeps as f64) as f32,
+        ));
 
         // Seed the top-level RNG used to derive every per-battle RNG and the
         // noise RNG. Deterministic given `seed`.

@@ -440,4 +440,32 @@ mod tests {
             "f32 quaternion norm drifted to {q_norm} after 500 steps (tol 1e-3)"
         );
     }
+
+    #[test]
+    fn test_f32_quaternion_drift_5000_steps() {
+        // Worst-case for a Phase-5 episode: 50 control ticks × 10 substeps × 10
+        // RK4 calls = 5 000 RK4 steps. Asserts norm stays within 1e-3 of 1.0,
+        // serving as a regression guard for any future change to renormalization.
+        //
+        // Same aggressive, asymmetric motor setup as test_f32_quaternion_norm_drift_500_steps.
+        let params = DroneParamsF32::crazyflie();
+        let mut state = DroneStateF32::hover_at(Vector3::new(0.0, 0.0, 1.5));
+        let motors = Vector4::new(
+            params.max_thrust,
+            params.max_thrust * 0.3,
+            params.max_thrust * 0.7,
+            params.max_thrust * 0.5,
+        );
+        let wind = Vector3::zeros();
+
+        for _ in 0..5000 {
+            state = step_rk4_f32(&state, &motors, &params, 0.001, &wind);
+        }
+
+        let q_norm = state.attitude.quaternion().norm();
+        assert!(
+            (q_norm - 1.0).abs() < 1e-3,
+            "f32 quaternion norm drifted to {q_norm} after 5000 steps (tol 1e-3)"
+        );
+    }
 }

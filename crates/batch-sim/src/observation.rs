@@ -119,4 +119,91 @@ mod tests {
         assert!((pitch).abs() < 1e-10);
         assert!((yaw).abs() < 1e-10);
     }
+
+    /// Compare `quaternion_to_euler` (hand-rolled in batch-sim/observation.rs)
+    /// with nalgebra's `UnitQuaternion::euler_angles()` (used in py-bridge).
+    ///
+    /// Both produce intrinsic ZYX / extrinsic XYZ Tait-Bryan angles.  They
+    /// must agree to within 1e-6 for any quaternion that is **not** at
+    /// gimbal-lock (|sin(pitch)| < 1).  At exact gimbal-lock (pitch = ±π/2)
+    /// the two implementations choose different conventions for the
+    /// degenerate roll/yaw split, so we skip those cases below.
+    #[test]
+    fn test_euler_convention_consistency() {
+        use nalgebra::UnitQuaternion;
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+        // Helper: build a unit quaternion from roll, pitch, yaw (ZYX, intrinsic).
+        let rpy_to_q = |r: f64, p: f64, y: f64| -> UnitQuaternion<f64> {
+            UnitQuaternion::from_euler_angles(r, p, y)
+        };
+
+        // (roll_in, pitch_in, yaw_in, near_gimbal_lock)
+        let cases: &[(f64, f64, f64, bool)] = &[
+            (0.0, 0.0, 0.0, false),                   // identity
+            (PI / 6.0, 0.0, 0.0, false),              // 30° roll
+            (0.0, PI / 3.0, 0.0, false),              // 60° pitch
+            (0.0, 0.0, PI / 4.0, false),              // 45° yaw
+            (FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, false), // combined non-singular
+            // Near-vertical (pitch = 89°): technically not gimbal-lock, but
+            // close enough that small quaternion errors may trigger different
+            // branches — include to verify tolerance holds.
+            (0.0, 89.0_f64.to_radians(), 0.0, false),
+            // Exact gimbal lock: pitch = +π/2. The two implementations choose
+            // arbitrary roll/yaw splits here; we flag them and skip the assert.
+            (0.0, FRAC_PI_2, 0.0, true),
+            // Exact gimbal lock: pitch = -π/2.
+            (0.0, -FRAC_PI_2, 0.0, true),
+        ];
+
+        for &(roll_in, pitch_in, yaw_in, near_lock) in cases {
+            let q = rpy_to_q(roll_in, pitch_in, yaw_in);
+
+            // Path A: hand-rolled (batch-sim)
+            let (roll_a, pitch_a, yaw_a) = quaternion_to_euler(&q);
+
+            // Path B: nalgebra (py-bridge)
+            let (roll_b, pitch_b, yaw_b) = q.euler_angles();
+
+            if near_lock {
+                // At gimbal-lock the roll/yaw split is arbitrary; only pitch
+                // must agree (it is well-defined as ±π/2).
+                assert!(
+                    (pitch_a - pitch_b).abs() < 1e-6,
+                    "gimbal-lock pitch mismatch: batch-sim={pitch_a} nalgebra={pitch_b} \
+                     (input pitch={pitch_in})"
+                );
+                // Document that roll/yaw disagree — this is expected behaviour.
+                // No assertion on roll_a/yaw_a vs roll_b/yaw_b here.
+            } else {
+                // Wrap angle difference into [-π, π] before comparing.
+                let wrap = |d: f64| -> f64 {
+                    let d = d % (2.0 * PI);
+                    if d > PI {
+                        d - 2.0 * PI
+                    } else if d < -PI {
+                        d + 2.0 * PI
+                    } else {
+                        d
+                    }
+                };
+                let tol = 1e-6;
+                assert!(
+                    wrap(roll_a - roll_b).abs() < tol,
+                    "roll mismatch (input r={roll_in:.3} p={pitch_in:.3} y={yaw_in:.3}): \
+                     batch-sim={roll_a} nalgebra={roll_b}"
+                );
+                assert!(
+                    wrap(pitch_a - pitch_b).abs() < tol,
+                    "pitch mismatch (input r={roll_in:.3} p={pitch_in:.3} y={yaw_in:.3}): \
+                     batch-sim={pitch_a} nalgebra={pitch_b}"
+                );
+                assert!(
+                    wrap(yaw_a - yaw_b).abs() < tol,
+                    "yaw mismatch (input r={roll_in:.3} p={pitch_in:.3} y={yaw_in:.3}): \
+                     batch-sim={yaw_a} nalgebra={yaw_b}"
+                );
+            }
+        }
+    }
 }

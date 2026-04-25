@@ -76,6 +76,9 @@ pub struct MppiOptimizer {
     /// Pre-allocated control buffers: one Vec per sample, capacity = horizon.
     /// Reused each call to avoid per-call heap allocation.
     ctrl_buffers: Vec<Vec<Vector4<f64>>>,
+    /// If Some, used as the master seed source for per-sample RNGs instead
+    /// of `rand::thread_rng()`. Makes runs reproducible for debugging.
+    rng: Option<SmallRng>,
 }
 
 impl MppiOptimizer {
@@ -112,7 +115,42 @@ impl MppiOptimizer {
             chance_constraint: None,
             lambda_cc: 0.0,
             ctrl_buffers,
+            rng: None,
         }
+    }
+
+    /// Create an `MppiOptimizer` with a fixed master seed, making
+    /// per-sample noise sequences reproducible across runs.
+    ///
+    /// When `rng` is set the optimizer draws per-sample seeds from a
+    /// `SmallRng` seeded from `seed` rather than `rand::thread_rng()`.
+    /// All other fields are identical to [`MppiOptimizer::new`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_seed(
+        num_samples: usize,
+        horizon: usize,
+        noise_std: f64,
+        temperature: f64,
+        params: DroneParams,
+        arena: Arena,
+        weights: CostWeights,
+        dt_ctrl: f64,
+        substeps: usize,
+        seed: u64,
+    ) -> Self {
+        let mut opt = Self::new(
+            num_samples,
+            horizon,
+            noise_std,
+            temperature,
+            params,
+            arena,
+            weights,
+            dt_ctrl,
+            substeps,
+        );
+        opt.rng = Some(SmallRng::seed_from_u64(seed));
+        opt
     }
 
     /// Enable risk-aware mode with wind sampling and CVaR filtering.
@@ -189,8 +227,12 @@ impl MppiOptimizer {
         let max_t = self.params.max_thrust;
         let hover = self.params.hover_thrust();
 
-        // Generate seeds for parallel RNG
-        let seeds: Vec<u64> = {
+        // Generate seeds for parallel RNG.
+        // If `self.rng` is set, draw from it for reproducibility; otherwise
+        // fall back to thread_rng (non-deterministic, original behaviour).
+        let seeds: Vec<u64> = if let Some(ref mut rng) = self.rng {
+            (0..self.num_samples).map(|_| rng.gen()).collect()
+        } else {
             let mut rng = rand::thread_rng();
             (0..self.num_samples).map(|_| rng.gen()).collect()
         };
@@ -594,6 +636,73 @@ mod tests {
         assert_eq!(
             opt2.lambda_cc, lambda_init2,
             "reset should restore lambda_cc to lambda_init"
+        );
+    }
+
+    #[test]
+    fn test_mppi_seeded_reproducible() {
+        // Two optimizers with the same seed must produce bit-identical actions.
+        let params = DroneParams::crazyflie();
+        let arena = test_arena();
+        let weights = CostWeights::default();
+
+        let a = DroneState::hover_at(Vector3::new(2.0, 5.0, 1.5));
+        let b = DroneState::hover_at(Vector3::new(8.0, 5.0, 1.5));
+
+        let mut opt1 = MppiOptimizer::with_seed(
+            64,
+            10,
+            0.03,
+            10.0,
+            params.clone(),
+            arena.clone(),
+            weights.clone(),
+            0.01,
+            10,
+            1234,
+        );
+        let mut opt2 = MppiOptimizer::with_seed(
+            64,
+            10,
+            0.03,
+            10.0,
+            params.clone(),
+            arena.clone(),
+            weights.clone(),
+            0.01,
+            10,
+            1234,
+        );
+
+        let action1 = opt1.compute_action(&a, &b, true);
+        let action2 = opt2.compute_action(&a, &b, true);
+
+        for i in 0..4 {
+            assert_eq!(
+                action1[i], action2[i],
+                "motor {i} differs between identical seeds: {} vs {}",
+                action1[i], action2[i]
+            );
+        }
+
+        // A different seed must (almost certainly) produce a different action.
+        let mut opt3 = MppiOptimizer::with_seed(
+            64,
+            10,
+            0.03,
+            10.0,
+            params.clone(),
+            arena.clone(),
+            weights.clone(),
+            0.01,
+            10,
+            9999,
+        );
+        let action3 = opt3.compute_action(&a, &b, true);
+        let motors_differ = (0..4).any(|i| (action3[i] - action1[i]).abs() > 1e-12);
+        assert!(
+            motors_differ,
+            "different seeds produced identical actions — noise has no effect"
         );
     }
 }
