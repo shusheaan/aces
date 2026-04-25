@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+
+ARG DEV_BASE_IMAGE=aces-dev-base:latest
+FROM ${DEV_BASE_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV POETRY_VIRTUALENVS_CREATE=false \
+    ACES_IMAGE_SOURCE_DIR=/opt/aces/image-src \
+    ACES_BOOTSTRAP_FROM_IMAGE=1 \
+    ACES_PROJECT_DIR=/workspace/aces
+
+WORKDIR /opt/aces/image-src
+
+COPY pyproject.toml poetry.lock README.md Cargo.toml Cargo.lock ./
+COPY crates/sim-core/Cargo.toml crates/sim-core/Cargo.toml
+COPY crates/mppi/Cargo.toml crates/mppi/Cargo.toml
+COPY crates/estimator/Cargo.toml crates/estimator/Cargo.toml
+COPY crates/py-bridge/Cargo.toml crates/py-bridge/Cargo.toml
+COPY crates/batch-sim/Cargo.toml crates/batch-sim/Cargo.toml
+
+RUN mkdir -p crates/game/src \
+    && printf '[package]\nname = "aces-game"\nversion = "0.1.0"\nedition = "2021"\n' \
+        > crates/game/Cargo.toml \
+    && printf 'fn main() {}\n' > crates/game/src/main.rs
+
+RUN poetry install --with dev --no-root --no-interaction --no-ansi \
+    && cargo fetch
+
+COPY aces/ aces/
+COPY configs/ configs/
+COPY crates/sim-core/src/ crates/sim-core/src/
+COPY crates/mppi/src/ crates/mppi/src/
+COPY crates/estimator/src/ crates/estimator/src/
+COPY crates/py-bridge/src/ crates/py-bridge/src/
+COPY crates/batch-sim/src/ crates/batch-sim/src/
+COPY crates/batch-sim/examples/ crates/batch-sim/examples/
+COPY scripts/ scripts/
+COPY tests/ tests/
+
+RUN poetry install --with dev --no-interaction --no-ansi \
+    && poetry run maturin develop --release --features gpu \
+    && python3 -c "from aces._core import GpuVecEnv, Simulation; print('[ACES] GPU extension import OK')"
+
+WORKDIR /workspace

@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUNPOD_BASE_IMAGE=runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+FROM ${RUNPOD_BASE_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG NODE_VERSION=25.9.0
+ARG NPM_VERSION=11.13.0
+ARG DOTFILES_REPO=
+ARG DOTFILES_REF=main
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CARGO_HOME=/opt/cargo \
+    RUSTUP_HOME=/opt/rustup \
+    NODE_HOME=/opt/node \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
+    PATH=/opt/node/bin:/opt/cargo/bin:/root/.local/bin:${PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash-completion \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        git-lfs \
+        jq \
+        less \
+        libgomp1 \
+        libssl-dev \
+        libvulkan1 \
+        pkg-config \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+        tmux \
+        unzip \
+        vim \
+        vulkan-tools \
+        zsh \
+    && git lfs install --system \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain stable --profile minimal \
+    && rustup component add clippy rustfmt
+
+RUN arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) node_arch="x64" ;; \
+        arm64) node_arch="arm64" ;; \
+        *) echo "Unsupported architecture: ${arch}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSLo /tmp/node.tar.xz \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+    && mkdir -p "${NODE_HOME}" \
+    && tar -xJf /tmp/node.tar.xz -C "${NODE_HOME}" --strip-components=1 \
+    && rm -f /tmp/node.tar.xz \
+    && node --version \
+    && npm install -g "npm@${NPM_VERSION}" \
+    && npm --version \
+    && npm install -g @anthropic-ai/claude-code \
+    && claude --version
+
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install \
+        "poetry>=2.1,<3.0" \
+        "maturin>=1.5,<2.0"
+
+RUN mkdir -p /opt/aces/bin /workspace /root/.config
+
+COPY docker/apply-dotfiles.sh docker/runpod-start.sh /opt/aces/bin/
+
+RUN chmod +x /opt/aces/bin/apply-dotfiles.sh /opt/aces/bin/runpod-start.sh
+
+RUN if [[ -n "${DOTFILES_REPO}" ]]; then \
+        git clone --depth 1 --branch "${DOTFILES_REF}" "${DOTFILES_REPO}" /tmp/dotfiles \
+        && /opt/aces/bin/apply-dotfiles.sh /tmp/dotfiles /root \
+        && rm -rf /tmp/dotfiles; \
+    fi
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/opt/aces/bin/runpod-start.sh"]
+CMD ["/start.sh"]
